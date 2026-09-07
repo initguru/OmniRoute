@@ -1077,3 +1077,20 @@ test("sanitizeReasoningEffortForProvider: OpenAI-compatible GLM-5.3-Flash mappin
   // unchanged (the generic #8057 pass-through default) — NOT mapped to high.
   assert.equal((result as Record<string, unknown>).reasoning_effort, "medium");
 });
+
+test("sanitizeReasoningEffortForProvider: GLM-5.3-Flash mapping ignores near-match model names", () => {
+  for (const model of ["notglm-5.3-flash", "glm-5.3-flashback", "vendor-glm-5.3-flash-experimental"]) {
+    const body = { model, reasoning_effort: "medium", messages: [{ role: "user", content: "hi" }] };
+    const result = sanitizeReasoningEffortForProvider(
+      body,
+      "openai-compatible-chat-sk",
+      model,
+      null
+    );
+    assert.equal(
+      (result as Record<string, unknown>).reasoning_effort,
+      "medium",
+      `near-match ${model} must not be rewritten`
+    );
+  }
+});

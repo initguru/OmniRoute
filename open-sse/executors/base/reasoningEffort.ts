@@ -56,7 +56,8 @@ const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 // GLM-5.3 Coding Plan surface — so pass those through unchanged and only map
 // the internal tiers GLM does not expose. Scoped to the 5.3 family so it does
 // not swallow GLM-5.2, which has its own (broader) vocabulary handling.
-const GLM_53_FLASH_MODEL_PATTERN = /glm[-_ ]?5\.3[-_ ]?flash/i;
+const GLM_53_FLASH_MODEL_PATTERN =
+  /(?:^|\/)glm[-_ ]?5\.3[-_ ]?flash(?:$|:(?:cloud)$|-(?:low|high|max)$)/i;
 
 /**
  * Model families whose top reasoning tier in their native API or upstream gateways
@@ -329,7 +330,10 @@ export function sanitizeReasoningEffortForProvider(
   // OpenAI-Compatible endpoints serving a self-hosted GLM-5.3-Flash model
   // (e.g. internal vLLM). Handle this before the generic GLM family rules:
   // GLM-5.2 on the same endpoint has a different contract and must pass through.
-  if (provider.startsWith(OPENAI_COMPATIBLE_PREFIX) && GLM_53_FLASH_MODEL_PATTERN.test(modelStr)) {
+  if (
+    provider.startsWith(OPENAI_COMPATIBLE_PREFIX) &&
+    GLM_53_FLASH_MODEL_PATTERN.test(modelStr)
+  ) {
     const mapped =
       effortStr === "xhigh"
         ? "max"
@@ -345,6 +349,15 @@ export function sanitizeReasoningEffortForProvider(
       );
       return writeEffortValue(b, mapped, c);
     }
+    return body;
+  }
+
+  // Do not let the generic GLM-5.3 family rule rewrite a near-match model
+  // whose name merely starts with the Flash identifier.
+  if (
+    provider.startsWith(OPENAI_COMPATIBLE_PREFIX) &&
+    /glm[-_ ]?5\.3[-_ ]?flash/i.test(modelStr) && !GLM_53_FLASH_MODEL_PATTERN.test(modelStr)
+  ) {
     return body;
   }
 
