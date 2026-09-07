@@ -8,6 +8,20 @@ export const CODEX_EFFORT_ORDER = [
   "ultra",
 ] as const;
 export type CodexEffortLevel = (typeof CODEX_EFFORT_ORDER)[number];
+
+/** Maximum reasoning effort per model; unlisted models retain the legacy xhigh cap. */
+export const CODEX_MAX_EFFORT_BY_MODEL: Record<string, CodexEffortLevel> = {
+  "gpt-6-astra": "ultra",
+  "gpt-5.6-sol": "ultra",
+  "gpt-5.6-terra": "ultra",
+  "gpt-5.6-luna": "max",
+  "gpt-5.3-codex": "xhigh",
+  "gpt-5.1-codex-max": "xhigh",
+  "gpt-5-mini": "high",
+  "gpt-5.1-mini": "high",
+  "gpt-4.1-mini": "high",
+};
+
 export const CODEX_MAX_ALIAS_MODELS = new Set([
   "gpt-5.6-sol",
   "gpt-5.6-terra",

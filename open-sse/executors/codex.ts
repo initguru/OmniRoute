@@ -54,6 +54,7 @@ export {
 import { isCodexFreePlan, normalizeCodexTools } from "./codex/tools.ts";
 import {
   CODEX_EFFORT_ORDER as EFFORT_ORDER,
+  CODEX_MAX_EFFORT_BY_MODEL as MAX_EFFORT_BY_MODEL,
   CODEX_ULTRA_ALIAS_MODELS,
   splitCodexReasoningSuffix,
   type CodexEffortLevel as EffortLevel,
@@ -323,23 +324,6 @@ function normalizeServiceTierValue(value: unknown): string | undefined {
   if (normalized === "fast") return CODEX_FAST_WIRE_VALUE;
   return normalized;
 }
-
-/**
- * Maximum reasoning effort allowed per Codex model.
- * Models not listed here retain the legacy xhigh cap.
- * Update this table when Codex releases new models with different caps.
- */
-const MAX_EFFORT_BY_MODEL: Record<string, EffortLevel> = {
-  "gpt-6-astra": "ultra",
-  "gpt-5.6-sol": "ultra",
-  "gpt-5.6-terra": "ultra",
-  "gpt-5.6-luna": "max",
-  "gpt-5.3-codex": "xhigh",
-  "gpt-5.1-codex-max": "xhigh",
-  "gpt-5-mini": "high",
-  "gpt-5.1-mini": "high",
-  "gpt-4.1-mini": "high",
-};
 
 /**
  * Clamp reasoning effort to the model's maximum allowed level.

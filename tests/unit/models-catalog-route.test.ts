@@ -16,6 +16,7 @@ const settingsDb = await import("../../src/lib/db/settings.ts");
 const apiKeysDb = await import("../../src/lib/db/apiKeys.ts");
 const featureFlagsDb = await import("../../src/lib/db/featureFlags.ts");
 const modelsDevSync = await import("../../src/lib/modelsDevSync.ts");
+const { runContextWindowReconcile } = await import("../../src/lib/contextWindowResolver.ts");
 const v1ModelsCatalog = await import("../../src/app/api/v1/models/catalog.ts");
 
 async function resetStorage() {
@@ -23,10 +24,7 @@ async function resetStorage() {
   apiKeysDb.resetApiKeyState();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
-  // #6408 added a 1.5s TTL response cache to getUnifiedModelsResponse keyed only by
-  // (prefix, isCodex client, apiKey) — NOT by DB/settings state. Without clearing it
-  // between test cases, a test running within the TTL window of a previous one gets
-  // served the previous test's stale serialized catalog instead of a fresh build.
+  // Reset response caches alongside SQLite so cases cannot reuse a prior catalog.
   v1ModelsCatalog.__resetCatalogBuilderRunsForTest();
 }
 
@@ -952,6 +950,8 @@ test("v1 models catalog advertises GLM-5.2 provider aliases with hosted context 
         "z-ai/glm-5.2": capability({ limit_context: 128000, limit_input: 128000 }),
       },
     });
+    // Discovery schedules reconciliation asynchronously; finish it before snapshotting.
+    await runContextWindowReconcile();
 
     const response = await v1ModelsCatalog.getUnifiedModelsResponse(
       new Request("http://localhost/api/v1/models")
@@ -1284,7 +1284,7 @@ test("v1 models catalog exposes Bedrock Claude token limits from static metadata
   assert.equal(opus46.max_output_tokens, 128000);
 });
 
-test("v1 models catalog lets provider-specific synced limits beat global static specs", async () => {
+test("v1 models catalog clamps registry input limits to the synced provider window", async () => {
   await seedConnection("github", {
     authType: "oauth",
     name: "github-copilot-models-dev",
@@ -1326,8 +1326,6 @@ test("v1 models catalog lets provider-specific synced limits beat global static 
     assert.equal(response.status, 200);
     assert.ok(model);
     assert.equal(model.context_length, 400000);
-    // The registry's explicit 922k input cap takes precedence over synced input,
-    // then clamps to the provider-specific total window.
     assert.equal(model.max_input_tokens, 400000);
     assert.equal(model.max_output_tokens, 128000);
   } finally {
