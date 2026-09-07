@@ -4,7 +4,12 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
 import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult, type ProviderCredentials } from "./base.ts";
-import { ZcodeAppServerClient, type ZcodeClientLike } from "./zcodeProtocol.ts";
+import {
+  ZcodeAppServerClient,
+  type ZcodeClientLike,
+  type ZcodeIncomingRequestHandler,
+} from "./zcodeProtocol.ts";
+import { ZcodeCaptchaSolver } from "../services/zcodeCaptchaSolver.ts";
 import { buildErrorBody, errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
 
 const ZCODE_URL = "zcode://app-server/stdio";
@@ -20,6 +25,17 @@ type OpenAIMsg = { role?: string; content?: unknown };
 
 type ZcodeCommand = { command: string; args: string[] };
 type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: string };
+type ZcodeCaptcha = { verifyParam: string; region: string };
+type ZcodeCaptchaSolverLike = { solve(options?: { timeoutMs?: number }): Promise<ZcodeCaptcha> };
+
+export type ZcodeClientFactoryOptions = {
+  onRequest: ZcodeIncomingRequestHandler;
+};
+
+const CAPTCHA_VERIFY_PARAM_HEADER = "x-aliyun-captcha-verify-param";
+const CAPTCHA_VERIFY_REGION_HEADER = "x-aliyun-captcha-verify-region";
+const DEFAULT_CAPTCHA_TIMEOUT_MS = 30_000;
+const MAX_CAPTCHA_RETRIES = 1;
 
 export interface ZcodeExecutorOptions {
   command?: string;
@@ -30,7 +46,9 @@ export interface ZcodeExecutorOptions {
   requestTimeoutMs?: number;
   turnTimeoutMs?: number;
   pollIntervalMs?: number;
-  clientFactory?: () => ZcodeClientLike;
+  clientFactory?: (options?: ZcodeClientFactoryOptions) => ZcodeClientLike;
+  captchaSolver?: ZcodeCaptchaSolverLike;
+  captchaTimeoutMs?: number;
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -155,6 +173,37 @@ function extractErrorMessage(value: unknown): string {
   return "ZCode app-server returned an error";
 }
 
+function extractErrorCode(value: unknown): number | string | undefined {
+  const root = asRecord(value);
+  const nested = asRecord(root.error);
+  const context = asRecord(nested.context);
+  const nestedData = asRecord(nested.data);
+  const rootData = asRecord(root.data);
+  const candidates = [
+    nested.code,
+    root.code,
+    nested.providerCode,
+    root.providerCode,
+    context.providerCode,
+    context.code,
+    nestedData.code,
+    nestedData.providerCode,
+    rootData.code,
+    rootData.providerCode,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" || typeof candidate === "string") return candidate;
+  }
+  return undefined;
+}
+
+function isCaptchaVerifyFailure(value: unknown): boolean {
+  const code = extractErrorCode(value);
+  if (code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED") return true;
+  const message = extractErrorMessage(value);
+  return /captcha[\s_-]*(?:verify|verification)[\s_-]*(?:failed|failure)/i.test(message);
+}
+
 function makeWorkspace(cwd: string): JsonRecord {
   return { workspacePath: cwd, workspaceIdentity: cwd };
 }
@@ -243,7 +292,10 @@ export class ZcodeExecutor extends BaseExecutor {
 
   constructor(options: ZcodeExecutorOptions = {}) {
     super("zcode", { id: "zcode", baseUrl: ZCODE_URL, format: "openai" });
-    this.options = options;
+    this.options = {
+      ...options,
+      captchaSolver: options.captchaSolver || new ZcodeCaptchaSolver(),
+    };
   }
 
   buildUrl(): string {
@@ -285,8 +337,20 @@ export class ZcodeExecutor extends BaseExecutor {
     }
   }
 
-  private createClient(): ZcodeClientLike {
-    if (this.options.clientFactory) return this.options.clientFactory();
+  private createClient(captcha?: ZcodeCaptcha): ZcodeClientLike {
+    const onRequest: ZcodeIncomingRequestHandler = (channel, method, _args) => {
+      if (channel === "interaction" && method === "requestProviderRuntimeHeaders") {
+        return {
+          headersApplied: Boolean(captcha),
+          runtimeHeaders: captcha ? {
+            [CAPTCHA_VERIFY_PARAM_HEADER]: captcha.verifyParam,
+            [CAPTCHA_VERIFY_REGION_HEADER]: captcha.region,
+          } : {},
+        };
+      }
+      return {};
+    };
+    if (this.options.clientFactory) return this.options.clientFactory({ onRequest });
     const command = this.options.command || process.env.ZCODE_SERVER_NODE || defaultCommand().command;
     const args = this.options.args || (process.env.ZCODE_SERVER_NODE
       ? [process.env.ZCODE_SERVER_ENTRY || join(process.env.ZCODE_SERVER_RUNTIME_ROOT || join(homedir(), ".zcode", "server"), "zcode-server.cjs")]
@@ -297,6 +361,7 @@ export class ZcodeExecutor extends BaseExecutor {
       cwd: this.options.cwd || process.env.ZCODE_CWD || process.cwd(),
       startupTimeoutMs: this.options.startupTimeoutMs ?? Number(process.env.ZCODE_STARTUP_TIMEOUT_MS || 10_000),
       requestTimeoutMs: this.options.requestTimeoutMs ?? Number(process.env.ZCODE_RPC_TIMEOUT_MS || 30_000),
+      onRequest,
     });
   }
 
@@ -304,9 +369,18 @@ export class ZcodeExecutor extends BaseExecutor {
     model: string,
     prompt: string,
     signal: AbortSignal | null | undefined,
-    log: ExecuteInput["log"]
+    log: ExecuteInput["log"],
+    captchaRetryCount = 0
   ): Promise<string> {
-    const client = this.createClient();
+    let captcha: ZcodeCaptcha | undefined;
+    const acquireCaptcha = async (): Promise<ZcodeCaptcha | undefined> => {
+      captcha = await this.options.captchaSolver?.solve({
+        timeoutMs: this.options.captchaTimeoutMs ?? Number(process.env.ZCODE_CAPTCHA_TIMEOUT_MS || DEFAULT_CAPTCHA_TIMEOUT_MS),
+      });
+      return captcha;
+    };
+    await acquireCaptcha();
+    const client = this.createClient(captcha);
     const cwd = resolve(this.options.cwd || process.env.ZCODE_CWD || process.cwd());
     const workspace = makeWorkspace(cwd);
     const providerId = this.options.providerId || process.env.ZCODE_PROVIDER_ID || DEFAULT_PROVIDER_ID;
@@ -336,12 +410,18 @@ export class ZcodeExecutor extends BaseExecutor {
         model: { providerId, modelId: model },
       }]), signal);
 
-      let state: unknown = await raceAbort(client.call("zcode-agent", "sendPrompt", [{
-        ...workspace,
-        sessionId,
-        inputId: randomUUID(),
-        content: prompt,
-      }]), signal);
+      let state: unknown;
+      try {
+        state = await raceAbort(client.call("zcode-agent", "sendPrompt", [{
+          ...workspace,
+          sessionId,
+          inputId: randomUUID(),
+          content: prompt,
+        }]), signal);
+      } catch (error) {
+        if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
+        return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
+      }
       const deadline = Date.now() + Math.max(1, turnTimeoutMs);
 
       while (Date.now() <= deadline) {
@@ -349,13 +429,23 @@ export class ZcodeExecutor extends BaseExecutor {
         const text = extractAssistantText(state);
         const status = extractStatus(state);
         if (text && (status === undefined || TERMINAL_STATUSES.has(status))) return text;
-        if (status === "error") throw new Error(extractErrorMessage(state));
+        if (status === "error") {
+          if (isCaptchaVerifyFailure(state) && captchaRetryCount < MAX_CAPTCHA_RETRIES) {
+            return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
+          }
+          throw new Error(extractErrorMessage(state));
+        }
         await delay(Math.max(0, pollIntervalMs), signal);
-        state = await raceAbort(client.call("zcode-agent", "readSession", [{
-          ...workspace,
-          sessionId,
-          messageLimit: 200,
-        }]), signal);
+        try {
+          state = await raceAbort(client.call("zcode-agent", "readSession", [{
+            ...workspace,
+            sessionId,
+            messageLimit: 200,
+          }]), signal);
+        } catch (error) {
+          if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
+          return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
+        }
       }
       const finalText = extractAssistantText(state);
       if (finalText) return finalText;

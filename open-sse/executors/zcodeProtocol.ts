@@ -6,6 +6,7 @@ const INITIALIZE_MESSAGE = 200;
 const RESPONSE_MESSAGE = 201;
 const ERROR_MESSAGE = 202;
 const CANCELED_MESSAGE = 203;
+const REQUEST_MESSAGE = 100;
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
 type JsonRecord = Record<string, unknown>;
@@ -17,6 +18,7 @@ export interface ZcodeAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   startupTimeoutMs?: number;
   requestTimeoutMs?: number;
+  onRequest?: ZcodeIncomingRequestHandler;
 }
 
 export interface ZcodeClientLike {
@@ -24,6 +26,12 @@ export interface ZcodeClientLike {
   call(channel: string, method: string, args: unknown[]): Promise<unknown>;
   close(): Promise<void>;
 }
+
+export type ZcodeIncomingRequestHandler = (
+  channel: string,
+  method: string,
+  args: unknown[]
+) => unknown | Promise<unknown>;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -135,16 +143,8 @@ export function decodeZcodeValue(data: Uint8Array, offset = 0): DecodedValue {
   throw new Error(`Unknown ZCode serialized value type ${type}`);
 }
 
-export function encodeZcodeRpcCall(
-  id: number,
-  channel: string,
-  method: string,
-  args: unknown[]
-): Buffer {
-  const body = Buffer.concat([
-    encodeZcodeValue([100, id, channel, method]),
-    encodeZcodeValue(args),
-  ]);
+function encodeZcodeRpcFrame(header: unknown, payload: unknown): Buffer {
+  const body = Buffer.concat([encodeZcodeValue(header), encodeZcodeValue(payload)]);
   const frame = Buffer.alloc(HEADER_SIZE + body.byteLength);
   frame.writeUInt8(REGULAR_MESSAGE, 0);
   frame.writeUInt32BE(0, 1);
@@ -154,12 +154,30 @@ export function encodeZcodeRpcCall(
   return frame;
 }
 
+export function encodeZcodeRpcCall(
+  id: number,
+  channel: string,
+  method: string,
+  args: unknown[]
+): Buffer {
+  return encodeZcodeRpcFrame([REQUEST_MESSAGE, id, channel, method], args);
+}
+
+function encodeZcodeRpcResponse(id: number, payload: unknown): Buffer {
+  return encodeZcodeRpcFrame([RESPONSE_MESSAGE, id], payload);
+}
+
+function encodeZcodeRpcError(id: number, error: unknown): Buffer {
+  const message = error instanceof Error ? error.message : String(error);
+  return encodeZcodeRpcFrame([ERROR_MESSAGE, id], { message });
+}
+
 function errorFromPayload(payload: unknown, fallback: string): Error {
   if (payload && typeof payload === "object") {
     const record = payload as JsonRecord;
     const message = typeof record.message === "string" ? record.message : fallback;
     const error = new Error(message);
-    if (typeof record.code === "string") Object.assign(error, { code: record.code });
+    if (typeof record.code === "string" || typeof record.code === "number") Object.assign(error, { code: record.code });
     if (record.data !== undefined) Object.assign(error, { data: record.data });
     return error;
   }
@@ -177,6 +195,7 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
   private readonly env?: NodeJS.ProcessEnv;
   private readonly startupTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly onRequest?: ZcodeIncomingRequestHandler;
   private child?: ChildProcessWithoutNullStreams;
   private pendingChunks: Buffer[] = [];
   private handshakeDone = false;
@@ -194,6 +213,7 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     this.env = options.env;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 10_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.onRequest = options.onRequest;
   }
 
   async start(): Promise<void> {
@@ -354,6 +374,32 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     const type = headerValue[0];
     if (type === INITIALIZE_MESSAGE) {
       this.serverReady?.();
+      return;
+    }
+    if (type === REQUEST_MESSAGE) {
+      const requestId = headerValue[1];
+      const channel = headerValue[2];
+      const method = headerValue[3];
+      if (typeof requestId !== "number" || typeof channel !== "string" || typeof method !== "string") return;
+      const child = this.child;
+      if (!child || !this.onRequest) return;
+      Promise.resolve(this.onRequest(channel, method, Array.isArray(payload) ? payload : []))
+        .then((result) => {
+          if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+          try {
+            child.stdin.write(encodeZcodeRpcResponse(requestId, result));
+          } catch (error) {
+            this.serverReadyError?.(error instanceof Error ? error : new Error(String(error)));
+          }
+        })
+        .catch((error) => {
+          if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+          try {
+            child.stdin.write(encodeZcodeRpcError(requestId, error));
+          } catch (writeError) {
+            this.serverReadyError?.(writeError instanceof Error ? writeError : new Error(String(writeError)));
+          }
+        });
       return;
     }
     if (type !== RESPONSE_MESSAGE && type !== ERROR_MESSAGE && type !== CANCELED_MESSAGE) return;
