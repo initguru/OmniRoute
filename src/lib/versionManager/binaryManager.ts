@@ -216,6 +216,11 @@ export async function getCurrentBinaryPath(dataDir?: string): Promise<string | n
   const symlinkPath = path.join(dir, "bin", managedBinaryName());
   try {
     const real = await fs.realpath(symlinkPath);
+    // Windows installs copy the managed executable rather than creating a
+    // symlink. Preserve the configured spawn path in that case; realpath()
+    // can rewrite macOS-compatible /var paths to /private/var, which makes
+    // the returned path differ from the path used by the installer.
+    if (os.platform() === "win32") return symlinkPath;
     return fsSync.existsSync(/* turbopackIgnore: true */ real) ? real : null;
   } catch {
     return null;
