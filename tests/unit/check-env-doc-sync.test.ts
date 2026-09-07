@@ -179,10 +179,18 @@ test("runEnvDocSync: ignore set skips a code-referenced var", () => {
   assert.equal(result.ok, true);
 });
 
-test("runEnvDocSync: shipped allowlist ignores ad-hoc BOT_TOKEN and BOT_URL", () => {
+test("runEnvDocSync: shipped allowlist ignores ad-hoc environment variables", () => {
   const envExampleText = `JWT_SECRET=secret\n`;
   const envDocText = "| `JWT_SECRET` | _(none)_ | required |";
-  const codeVars = new Set(["JWT_SECRET", "BOT_TOKEN", "BOT_URL"]);
+  const codeVars = new Set([
+    "JWT_SECRET",
+    "BOT_TOKEN",
+    "BOT_URL",
+    "BOOTSTRAP_ENTRY",
+    "ENV_FILE",
+    "HEALTH_URL",
+    "SERVER_ENV_FILE",
+  ]);
 
   const unignored = runEnvDocSync({
     envExampleText,
@@ -193,7 +201,14 @@ test("runEnvDocSync: shipped allowlist ignores ad-hoc BOT_TOKEN and BOT_URL", ()
     envOnlyAllowlist: new Set(),
   });
   assert.equal(unignored.ok, false);
-  assert.deepEqual(unignored.problems.codeMissingEnv, ["BOT_TOKEN", "BOT_URL"]);
+  assert.deepEqual(unignored.problems.codeMissingEnv, [
+    "BOOTSTRAP_ENTRY",
+    "BOT_TOKEN",
+    "BOT_URL",
+    "ENV_FILE",
+    "HEALTH_URL",
+    "SERVER_ENV_FILE",
+  ]);
 
   // Omit `ignore` so the checker uses IGNORE_FROM_CODE from check-env-doc-sync.mjs.
   const shipped = runEnvDocSync({

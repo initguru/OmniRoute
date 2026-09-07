@@ -217,6 +217,12 @@ const IGNORE_FROM_CODE = new Set([
   // operator-supplied bot credentials, not user-facing OmniRoute config.
   "BOT_TOKEN",
   "BOT_URL",
+  // PM2 re-registration helper inputs from scripts/ad-hoc/pm2_reregister.sh —
+  // deployment/tooling context, not OmniRoute runtime configuration.
+  "BOOTSTRAP_ENTRY",
+  "ENV_FILE",
+  "HEALTH_URL",
+  "SERVER_ENV_FILE",
   // XDG standard data directory — set by OS/desktop session, not OmniRoute config.
   // Read by setup-open-code.mjs to locate platform-specific OpenCode data dir.
   "XDG_DATA_HOME",
