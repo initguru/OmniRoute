@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { groupByDay, relativeTime } from "../../src/lib/audit/timeline.ts";
@@ -80,6 +81,27 @@ test("groupByDay with only one entry today → 1 group", () => {
   assert.equal(groups.length, 1);
   assert.equal(groups[0].label, "today");
   assert.equal(groups[0].entries.length, 1);
+});
+
+test("groupByDay labels the previous local calendar day as yesterday across DST", () => {
+  const script = `
+    import { groupByDay } from "./src/lib/audit/timeline.ts";
+    const entry = {
+      id: 1, action: "provider.added", actor: "admin", target: "test-target",
+      status: null, timestamp: "2026-03-08T22:30:00-05:00", createdAt: "2026-03-08T22:30:00-05:00",
+      details: null, metadata: null, ip_address: null, ip: null, resource_type: null,
+      resourceType: null, request_id: null, requestId: null,
+    };
+    const groups = groupByDay([entry], new Date("2026-03-09T00:30:00-04:00").getTime());
+    if (groups.length !== 1 || groups[0].dayKey !== "2026-03-08" || groups[0].label !== "yesterday") {
+      throw new Error(JSON.stringify(groups));
+    }
+  `;
+  execFileSync(process.execPath, ["--import", "tsx/esm", "--eval", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, TZ: "America/New_York" },
+    stdio: "pipe",
+  });
 });
 
 test("groupByDay dayKey format is YYYY-MM-DD", () => {

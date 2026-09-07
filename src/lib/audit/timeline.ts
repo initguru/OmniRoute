@@ -52,7 +52,10 @@ export function groupByDay(entries: AuditLogEntry[], referenceNowMs?: number): D
 
   const nowMs = referenceNowMs ?? Date.now();
   const todayKey = epochToDayKey(nowMs);
-  const yesterdayKey = epochToDayKey(nowMs - 24 * 60 * 60 * 1000);
+  // Subtract a calendar day, not 24 hours: local days can be 23 or 25 hours across DST.
+  const yesterday = new Date(nowMs);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayKey = epochToDayKey(yesterday.getTime());
 
   // Sort descending by timestamp
   const sorted = [...entries].sort((a, b) => {
@@ -98,11 +101,7 @@ export function groupByDay(entries: AuditLogEntry[], referenceNowMs?: number): D
  * @param locale - "en" or "pt-BR"
  * @param referenceNowMs - Override for "now" (ms since epoch). Defaults to Date.now().
  */
-export function relativeTime(
-  iso: string,
-  locale: "en" | "pt-BR",
-  referenceNowMs?: number
-): string {
+export function relativeTime(iso: string, locale: "en" | "pt-BR", referenceNowMs?: number): string {
   const nowMs = referenceNowMs ?? Date.now();
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) {
