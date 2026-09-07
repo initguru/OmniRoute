@@ -147,6 +147,17 @@ type AntigravityRequestEnvelope = Record<string, unknown> & {
   enabledCreditTypes?: string[];
 };
 
+const ANTIGRAVITY_ENVELOPE_FIELDS = new Set([
+  "project",
+  "requestId",
+  "request",
+  "model",
+  "userPromptId",
+  "userAgent",
+  "requestType",
+  "enabledCreditTypes",
+]);
+
 const MAX_CREDIT_BALANCE_ENTRIES = 50;
 const CREDIT_BALANCE_TTL_MS = 5 * 60 * 1000;
 const creditBalanceCache = new Map<string, { balance: number; updatedAt: number }>();
@@ -361,7 +372,9 @@ const COMPETITIVE_AGENT_PROMPT_PATTERNS: RegExp[] = [
  */
 export function stripCompetitiveAgentPrompts(systemInstruction: unknown): unknown {
   const record = asRecord(systemInstruction);
-  const parts = Array.isArray(record?.parts) ? (record.parts as Array<Record<string, unknown>>) : [];
+  const parts = Array.isArray(record?.parts)
+    ? (record.parts as Array<Record<string, unknown>>)
+    : [];
   if (parts.length === 0) return systemInstruction;
 
   let changed = false;
@@ -369,7 +382,10 @@ export function stripCompetitiveAgentPrompts(systemInstruction: unknown): unknow
     if (typeof part.text !== "string" || part.text.length === 0) return part;
     let text = part.text;
     for (const pattern of COMPETITIVE_AGENT_PROMPT_PATTERNS) {
-      const stripped = text.replace(pattern, "").replace(/\n{3,}/g, "\n\n").trimStart();
+      const stripped = text
+        .replace(pattern, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trimStart();
       if (stripped !== text) {
         changed = true;
         text = stripped;
@@ -790,6 +806,7 @@ export class AntigravityExecutor extends BaseExecutor {
       requestType: _requestType,
       requestId: _requestId,
       request: _request,
+      userPromptId: _userPromptId,
       // #1944: output_config (and the legacy output_format) are Anthropic/Claude-Code-only
       // fields. Google's Cloud Code envelope rejects unknown top-level fields with a 400
       // ("Invalid JSON payload received. Unknown name \"output_config\""), which broke every
@@ -806,6 +823,7 @@ export class AntigravityExecutor extends BaseExecutor {
       enable_thinking: _enableThinking,
       thinking_budget: _thinkingBudget,
       enabledCreditTypes: _enabledCreditTypes,
+      _toolNameMap: toolNameMap,
       ...passthroughFields
     } = normalizedBody;
 
@@ -817,8 +835,26 @@ export class AntigravityExecutor extends BaseExecutor {
       model: upstreamModel,
       userAgent: getAntigravityEnvelopeUserAgent(credentials),
       requestType,
-      ...passthroughFields,
     };
+
+    for (const [key, value] of Object.entries(passthroughFields)) {
+      if (ANTIGRAVITY_ENVELOPE_FIELDS.has(key)) {
+        envelope[key] = value;
+      }
+    }
+
+    if (typeof _userPromptId === "string" && _userPromptId.length > 0) {
+      envelope.userPromptId = _userPromptId;
+    }
+
+    if (toolNameMap instanceof Map) {
+      Object.defineProperty(envelope, "_toolNameMap", {
+        value: toolNameMap,
+        configurable: true,
+        enumerable: false,
+        writable: true,
+      });
+    }
 
     return envelope;
   }
