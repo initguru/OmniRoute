@@ -721,6 +721,33 @@ export async function handleChatCore({
     payload?: unknown,
     maxDepth = 3
   ): EffectiveServiceTier | null => resolveReportedServiceTierFor(provider, payload, maxDepth);
+  // Resolve the endpoint before creating failure callbacks. A limiter expiration can invoke
+  // persistFailureUsage before the guarded request body reaches the main routing block.
+  const {
+    endpointPath,
+    sourceFormat,
+    isResponsesEndpoint,
+    nativeCodexPassthrough,
+    nativeXaiResponsesPassthrough,
+    isDroidCLI,
+    isOpencodeClient,
+    copilotCompatibleReasoning,
+    clientResponseFormat,
+  } = resolveChatCoreRequestFormat({ clientRawRequest, body, provider, userAgent });
+  const nativeOpenAICompatibleResponsesPassthrough =
+    shouldUseNativeOpenAICompatibleResponsesPassthrough({
+      provider,
+      sourceFormat,
+      endpointPath,
+      providerSpecificData: credentials?.providerSpecificData,
+    });
+  const responsesInputItems = Array.isArray(body?.input) ? body.input : [];
+  const customToolNames = collectCustomToolNamesForSourceFormat(
+    sourceFormat,
+    FORMATS.OPENAI_RESPONSES,
+    body?.tools,
+    responsesInputItems
+  );
   // Failure usage record building extracted to chatCore/failureUsage.ts (#3501); the handler keeps
   // the fire-and-forget save + computes latencyMs, so the call sites stay byte-identical.
   const persistFailureUsage = (statusCode: number, errorCode?: string | null) => {
@@ -787,34 +814,6 @@ export async function handleChatCore({
   if (connectionId && credentials && !credentials.connectionId) {
     credentials.connectionId = connectionId;
   }
-  // Endpoint/format resolution extracted to chatCore/requestFormat.ts (#3501); pure derivation
-  // from the inbound request, destructured so every downstream use stays byte-identical.
-  const {
-    endpointPath,
-    sourceFormat,
-    isResponsesEndpoint,
-    nativeCodexPassthrough,
-    nativeXaiResponsesPassthrough,
-    isDroidCLI,
-    isOpencodeClient,
-    copilotCompatibleReasoning,
-    clientResponseFormat,
-  } = resolveChatCoreRequestFormat({ clientRawRequest, body, provider, userAgent });
-  const nativeOpenAICompatibleResponsesPassthrough =
-    shouldUseNativeOpenAICompatibleResponsesPassthrough({
-      provider,
-      sourceFormat,
-      endpointPath,
-      providerSpecificData: credentials?.providerSpecificData,
-    });
-  const responsesInputItems = Array.isArray(body?.input) ? body.input : [];
-  const customToolNames = collectCustomToolNamesForSourceFormat(
-    sourceFormat,
-    FORMATS.OPENAI_RESPONSES,
-    body?.tools,
-    responsesInputItems
-  );
-
   const requestedLifecycleError = checkLifecycle(provider, model, log);
   if (requestedLifecycleError) return requestedLifecycleError;
 

@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "observation": "embedded-protobuf-descriptor",
+    "descriptor": "google/internal/cloud/code/v1internal/prediction_service.proto",
+    "message": "google.internal.cloud.code.v1internal.GenerateContentRequest",
+    "clients": [
+      {
+        "product": "Antigravity CLI",
+        "version": "1.1.22",
+        "platform": "darwin/arm64",
+        "signerTeam": "EQHXZ8M8AV",
+        "sha256": "7b1317779085913d338bde0e9b39b72323d9083a879525f944fd469c8ecca906",
+        "descriptorOffset": 49973067
+      },
+      {
+        "product": "Antigravity Desktop language_server",
+        "version": "2.0.6",
+        "platform": "darwin/arm64",
+        "signerTeam": "EQHXZ8M8AV",
+        "sha256": "2238fcb1b86d47f19ba1bd4f54da75d2b5f6d82d18082f89b5d6e5feedba74a7",
+        "descriptorOffset": 39747100
+      }
+    ],
+    "scope": "Field names and protobuf types only. Not a network capture or proof of serialization, TLS, or server acceptance."
+  },
+  "fields": [
+    { "name": "project", "number": 1, "type": "string" },
+    { "name": "requestId", "number": 2, "type": "string" },
+    {
+      "name": "request",
+      "number": 3,
+      "type": "google.cloud.aiplatform.master.GenerateContentRequest"
+    },
+    { "name": "model", "number": 4, "type": "string" },
+    { "name": "userPromptId", "number": 5, "type": "string" },
+    { "name": "userAgent", "number": 6, "type": "string" },
+    { "name": "requestType", "number": 7, "type": "string" },
+    { "name": "enabledCreditTypes", "number": 8, "type": "Credits.CreditType", "repeated": true }
+  ]
+}
