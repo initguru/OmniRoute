@@ -56,7 +56,7 @@ const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 // GLM-5.3 Coding Plan surface — so pass those through unchanged and only map
 // the internal tiers GLM does not expose. Scoped to the 5.3 family so it does
 // not swallow GLM-5.2, which has its own (broader) vocabulary handling.
-const GLM_53_FLASH_MODEL_PATTERN = /glm[-_ ]?5\.3(?:[-_ ]?flash)?/i;
+const GLM_53_FLASH_MODEL_PATTERN = /glm[-_ ]?5\.3[-_ ]?flash/i;
 
 /**
  * Model families whose top reasoning tier in their native API or upstream gateways
@@ -78,19 +78,11 @@ export const GLM_53_FAMILY_PATTERN = /(?:^|\/|\b)glm-5\.3(?:$|-)/i;
 export const GLM_52_FAMILY_PATTERN = /(?:^|\/|\b)glm-5\.2(?:$|-)/i;
 
 export function isCommandCodeProvider(provider: string): boolean {
-  return (
-    provider === "command-code" ||
-    provider === "cmd" ||
-    provider === "command_code"
-  );
+  return provider === "command-code" || provider === "cmd" || provider === "command_code";
 }
 
 export function isOllamaCloudProvider(provider: string): boolean {
-  return (
-    provider === "ollama-cloud" ||
-    provider === "ollamacloud" ||
-    provider === "ollama_cloud"
-  );
+  return provider === "ollama-cloud" || provider === "ollamacloud" || provider === "ollama_cloud";
 }
 
 export function isOpencodeGoProvider(provider: string): boolean {
@@ -214,12 +206,7 @@ export function supportsMaxEffortForProvider(provider: string, model: string): b
     MAX_TIER_REASONING_MODEL_PATTERN.test(resolvedModelId) ||
     MAX_TIER_REASONING_MODEL_PATTERN.test(model);
   return (
-    isClaude ||
-    isOpencodeGo ||
-    isOllamaCloud ||
-    isMoonshotK3 ||
-    isCommandCode ||
-    isMaxTierModel
+    isClaude || isOpencodeGo || isOllamaCloud || isMoonshotK3 || isCommandCode || isMaxTierModel
   );
 }
 
@@ -337,6 +324,34 @@ export function sanitizeReasoningEffortForProvider(
       `${provider}/${modelStr}: removed unsupported reasoning_effort`
     );
     return stripEffortValue(b, c);
+  }
+
+  // OpenAI-Compatible endpoints serving a self-hosted GLM-5.3-Flash model
+  // (e.g. internal vLLM). Handle this before the generic GLM family rules:
+  // GLM-5.2 on the same endpoint has a different contract and must pass through.
+  if (provider.startsWith(OPENAI_COMPATIBLE_PREFIX) && GLM_53_FLASH_MODEL_PATTERN.test(modelStr)) {
+    const mapped =
+      effortStr === "xhigh"
+        ? "max"
+        : effortStr === "medium"
+          ? "high"
+          : effortStr === "none" || effortStr === "minimal"
+            ? "low"
+            : null;
+    if (mapped && mapped !== effortStr) {
+      log?.info?.(
+        "REASONING_SANITIZE",
+        `${provider}/${modelStr}: normalized reasoning_effort ${effortStr} → ${mapped}`
+      );
+      return writeEffortValue(b, mapped, c);
+    }
+    return body;
+  }
+
+  // The OpenAI-compatible GLM-5.2 surrogate has no local effort mapping;
+  // preserve its canonical request vocabulary and let the endpoint decide.
+  if (provider.startsWith(OPENAI_COMPATIBLE_PREFIX) && GLM_52_FAMILY_PATTERN.test(modelStr)) {
+    return body;
   }
 
   // ── GLM-5.3 and GLM-5.3-FLASH specific rules ──────────────────────────────
@@ -525,32 +540,6 @@ export function sanitizeReasoningEffortForProvider(
       log?.info?.(
         "REASONING_SANITIZE",
         `deepseek/${modelStr}: normalized reasoning_effort ${effortStr} → ${mapped}`
-      );
-      return writeEffortValue(b, mapped, c);
-    }
-    return body;
-  }
-
-  // OpenAI-Compatible endpoints serving a self-hosted GLM-5.3-Flash model
-  // (e.g. internal vLLM, provider id "openai-compatible-..."). GLM-5.3-Flash
-  // accepts reasoning_effort as {low, high, max} literally, so pass those
-  // through unchanged. Only map the internal tiers GLM does not expose: Claude
-  // Code may still send none/minimal/medium/xhigh (it cannot be constrained via
-  // model-catalogs), so none/minimal → low, medium → high, and xhigh → max
-  // before the request reaches the endpoint.
-  if (provider.startsWith(OPENAI_COMPATIBLE_PREFIX) && GLM_53_FLASH_MODEL_PATTERN.test(modelStr)) {
-    const mapped =
-      effortStr === "xhigh"
-        ? "max"
-        : effortStr === "medium"
-          ? "high"
-          : effortStr === "none" || effortStr === "minimal"
-            ? "low"
-            : null;
-    if (mapped && mapped !== effortStr) {
-      log?.info?.(
-        "REASONING_SANITIZE",
-        `${provider}/${modelStr}: normalized reasoning_effort ${effortStr} → ${mapped}`
       );
       return writeEffortValue(b, mapped, c);
     }
