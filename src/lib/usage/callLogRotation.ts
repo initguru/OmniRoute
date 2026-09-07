@@ -14,11 +14,7 @@ import {
   selectCallLogIdsBefore,
   selectOverflowArtifactPaths,
 } from "./callLogsBoundedQueries";
-import {
-  CALL_LOGS_DIR,
-  deleteCallArtifact,
-  type CallLogDetailState,
-} from "./callLogArtifacts";
+import { CALL_LOGS_DIR, deleteCallArtifact, type CallLogDetailState } from "./callLogArtifacts";
 import { getCallLogMaxEntries, getCallLogRetentionDays, getCallLogsTableMaxRows } from "../logEnv";
 import { isSqlitePagerCorruptError, notePagerCorruption } from "../db/healthCheck";
 
@@ -91,6 +87,7 @@ type OrphanScanCursor = {
   day: fs.Dir | null;
   dayName: string | null;
   pendingDayName: string | null;
+  seenPaths: Set<string>;
 };
 
 type OrphanScanBatch = {
@@ -129,6 +126,7 @@ function readOrphanCandidates(
       day: null,
       dayName: null,
       pendingDayName: null,
+      seenPaths: new Set(),
     };
   }
 
@@ -172,7 +170,10 @@ function readOrphanCandidates(
       continue;
     }
     if (!fileEntry.isFile() || !fileEntry.name.endsWith(".json")) continue;
-    candidates.push(path.posix.join(orphanScanCursor.dayName!, fileEntry.name));
+    const relativePath = path.posix.join(orphanScanCursor.dayName!, fileEntry.name);
+    if (orphanScanCursor.seenPaths.has(relativePath)) continue;
+    orphanScanCursor.seenPaths.add(relativePath);
+    candidates.push(relativePath);
   }
   return { candidates, exhausted, scannedEntries };
 }
@@ -209,10 +210,20 @@ export function cleanupOrphanCallLogFiles(
         }
       });
       const referenced = findReferencedArtifacts(oldEnough);
-      for (const relativePath of oldEnough) {
-        if (!referenced.has(relativePath) && deleteCallArtifact(relativePath, baseDir)) deleted++;
+      if (exhausted || scannedEntries === 0) {
+        for (const relativePath of oldEnough) {
+          if (!referenced.has(relativePath) && deleteCallArtifact(relativePath, baseDir)) deleted++;
+        }
+        break;
       }
-      if (exhausted || scannedEntries === 0) break;
+      for (const relativePath of oldEnough) {
+        if (!referenced.has(relativePath)) {
+          try {
+            fs.unlinkSync(path.join(baseDir, relativePath));
+            deleted++;
+          } catch {}
+        }
+      }
     }
     return deleted;
   } catch (error) {
