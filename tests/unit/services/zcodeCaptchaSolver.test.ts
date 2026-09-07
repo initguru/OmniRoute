@@ -8,6 +8,21 @@ import {
 } from "../../../open-sse/services/zcodeCaptchaSolver.ts";
 
 const VALID_TOKEN = "v".repeat(280);
+const CAPTCHA_STATE_KEY = "__zcodeCaptchaState";
+
+type CaptchaResponse = { captchaResult: boolean; bizResult: boolean };
+type CaptchaVerifyCallback = (
+  captchaVerifyParam: unknown,
+  callback?: (response: CaptchaResponse) => void
+) => CaptchaResponse | Promise<CaptchaResponse> | void;
+type CapturedCaptchaOptions = {
+  captchaVerifyCallback: CaptchaVerifyCallback;
+};
+type CaptchaState = { verifyParam: string | null; error: string | null };
+type CaptchaWindow = Record<string, unknown> & {
+  initAliyunCaptcha?: (options: CapturedCaptchaOptions) => void;
+};
+type CaptchaDocument = { body: { innerHTML: string } };
 
 type Harness = {
   deps: ZcodeCaptchaSolverDependencies;
@@ -15,6 +30,8 @@ type Harness = {
   opened: number;
   closed: number;
   scripts: string[];
+  captchaOptions: CapturedCaptchaOptions | null;
+  captchaState: CaptchaState;
 };
 
 function createHarness(
@@ -25,6 +42,15 @@ function createHarness(
   const scripts: string[] = [];
   let opened = 0;
   let closed = 0;
+  let captchaOptions: CapturedCaptchaOptions | null = null;
+  const captchaState: CaptchaState = { verifyParam: null, error: null };
+  const fakeWindow: CaptchaWindow = {
+    initAliyunCaptcha(options) {
+      captchaOptions = options;
+    },
+  };
+  const fakeDocument: CaptchaDocument = { body: { innerHTML: "" } };
+  const evaluateContext = { window: fakeWindow, document: fakeDocument };
 
   const deps = {
     acquireBrowserContext: async (key: string, options: Record<string, unknown>) => {
@@ -38,17 +64,55 @@ function createHarness(
         async addScriptTag(options: { url: string }) {
           scripts.push(options.url);
         },
-        async evaluate<T>(fn: unknown): Promise<T> {
+        async evaluate<T>(fn: unknown, arg?: unknown): Promise<T> {
           const serialized = String(fn);
           if (serialized.includes("CAPTCHA_STATE_KEY") || serialized.includes("asErrorMessage")) {
             throw new Error("page.evaluate callback captured a Node-only helper");
           }
           // The first evaluation installs the DOM/config and starts the captcha;
           // the final evaluation reads the state after waitForFunction resolves.
-          if (String(fn).includes("return value")) {
-            return { verifyParam: token, error: verificationError } as T;
+          if (serialized.includes("return value")) {
+            const stateKey = arg as string;
+            const state = fakeWindow[stateKey] as CaptchaState | undefined;
+            if (state) {
+              state.verifyParam = token;
+              state.error = verificationError;
+            } else {
+              fakeWindow[stateKey] = captchaState;
+              captchaState.verifyParam = token;
+              captchaState.error = verificationError;
+            }
           }
-          return undefined as T;
+          const evaluateGlobal = globalThis as typeof globalThis & {
+            window?: CaptchaWindow;
+            document?: CaptchaDocument;
+          };
+          const hadWindow = Object.hasOwn(evaluateGlobal, "window");
+          const hadDocument = Object.hasOwn(evaluateGlobal, "document");
+          const previousWindow = evaluateGlobal.window;
+          const previousDocument = evaluateGlobal.document;
+          evaluateGlobal.window = fakeWindow;
+          evaluateGlobal.document = fakeDocument;
+          let result: T;
+          try {
+            result = (fn as (value?: unknown) => T).call(evaluateContext, arg);
+          } finally {
+            if (hadWindow) evaluateGlobal.window = previousWindow;
+            else delete evaluateGlobal.window;
+            if (hadDocument) evaluateGlobal.document = previousDocument;
+            else delete evaluateGlobal.document;
+          }
+          if (serialized.includes("initAliyunCaptcha")) {
+            return undefined as T;
+          }
+          if (serialized.includes("return value")) {
+            const resultState = result as CaptchaState | null;
+            if (resultState) {
+              captchaState.verifyParam = resultState.verifyParam;
+              captchaState.error = resultState.error;
+            }
+          }
+          return result;
         },
         async waitForFunction<T>(): Promise<T> {
           return {} as T;
@@ -70,6 +134,12 @@ function createHarness(
       return closed;
     },
     scripts,
+    get captchaOptions() {
+      return captchaOptions;
+    },
+    get captchaState() {
+      return (fakeWindow[CAPTCHA_STATE_KEY] as CaptchaState | undefined) ?? captchaState;
+    },
   } as Harness;
 }
 
@@ -86,6 +156,62 @@ describe("ZcodeCaptchaSolver", () => {
     assert.equal(harness.acquired[0]?.options.headless, false);
     assert.equal(harness.scripts[0], "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js");
     assert.equal(harness.closed, 1);
+  });
+
+  it("captures the Aliyun callback and accepts an object verification request", async () => {
+    const harness = createHarness();
+    const solver = new ZcodeCaptchaSolver(harness.deps);
+
+    await solver.solve();
+
+    assert.ok(harness.captchaOptions);
+    const callbackResult = harness.captchaOptions.captchaVerifyCallback({
+      sceneId: "11xygtvd",
+      certifyId: "test-cert",
+      deviceToken: "a".repeat(200),
+    });
+
+    assert.deepEqual(callbackResult, { captchaResult: true, bizResult: true });
+    assert.equal(
+      harness.captchaState.verifyParam,
+      JSON.stringify({
+        sceneId: "11xygtvd",
+        certifyId: "test-cert",
+        deviceToken: "a".repeat(200),
+      })
+    );
+  });
+
+  it("accepts a serialized verification request and calls the SDK response callback", async () => {
+    const harness = createHarness();
+    const solver = new ZcodeCaptchaSolver(harness.deps);
+
+    await solver.solve();
+
+    assert.ok(harness.captchaOptions);
+    let callbackResponse: CaptchaResponse | undefined;
+    const verifyParam = "test-verify-param-token".repeat(15);
+    const callbackResult = harness.captchaOptions.captchaVerifyCallback(verifyParam, (response) => {
+      callbackResponse = response;
+    });
+
+    assert.deepEqual(callbackResult, { captchaResult: true, bizResult: true });
+    assert.deepEqual(callbackResponse, { captchaResult: true, bizResult: true });
+    assert.equal(harness.captchaState.verifyParam, verifyParam);
+  });
+
+  it("records a failure for an empty verification request", async () => {
+    const harness = createHarness();
+    const solver = new ZcodeCaptchaSolver(harness.deps);
+
+    await solver.solve();
+
+    assert.ok(harness.captchaOptions);
+    assert.deepEqual(harness.captchaOptions.captchaVerifyCallback(null), {
+      captchaResult: true,
+      bizResult: true,
+    });
+    assert.equal(harness.captchaState.error, "captcha verification returned an empty verifyParam");
   });
 
   it("creates a new page and obtains a new token for every solve call", async () => {

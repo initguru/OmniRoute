@@ -26,13 +26,18 @@ type AliyunCaptchaInstance = {
   startTracelessVerification?: () => void;
 };
 
-type AliyunCaptchaInitOptions = {
+type AliyunCaptchaResponse = { captchaResult: boolean; bizResult: boolean };
+
+interface AliyunCaptchaOptions {
   SceneId: string;
   prefix: string;
   mode: "popup";
   element: string;
   button: string;
-  captchaVerifyCallback: (captchaVerifyParam: unknown) => void;
+  captchaVerifyCallback: (
+    captchaVerifyParam: unknown,
+    callback?: (res: AliyunCaptchaResponse) => void
+  ) => AliyunCaptchaResponse | Promise<AliyunCaptchaResponse> | void;
   onBizResultCallback: (bizResult: unknown) => void;
   getInstance: (instance: AliyunCaptchaInstance) => void;
   slideStyle: { width: number; height: number };
@@ -42,7 +47,7 @@ type AliyunCaptchaInitOptions = {
 
 type AliyunCaptchaWindow = Window & {
   AliyunCaptchaConfig?: { region: string; prefix: string };
-  initAliyunCaptcha?: (options: AliyunCaptchaInitOptions) => void;
+  initAliyunCaptcha?: (options: AliyunCaptchaOptions) => void;
   [CAPTCHA_STATE_KEY]?: CaptchaState;
 };
 
@@ -135,12 +140,28 @@ async function installCaptcha(page: ZcodeCaptchaPage): Promise<void> {
           mode: "popup",
           element: "#captcha-element",
           button: "#captcha-btn",
-          captchaVerifyCallback: (captchaVerifyParam: unknown) => {
-            if (typeof captchaVerifyParam !== "string" || captchaVerifyParam.length === 0) {
-              setFailure("captcha verification returned an empty verifyParam");
-              return;
+          captchaVerifyCallback: (
+            captchaVerifyParam: unknown,
+            callback?: (res: AliyunCaptchaResponse) => void
+          ) => {
+            const response: AliyunCaptchaResponse = { captchaResult: true, bizResult: true };
+            let serializedVerifyParam: string | null = null;
+            if (typeof captchaVerifyParam === "string") {
+              if (captchaVerifyParam.length > 0) {
+                serializedVerifyParam = captchaVerifyParam;
+              }
+            } else if (typeof captchaVerifyParam === "object" && captchaVerifyParam !== null) {
+              serializedVerifyParam = JSON.stringify(captchaVerifyParam);
             }
-            state.verifyParam = captchaVerifyParam;
+            if (!serializedVerifyParam) {
+              setFailure("captcha verification returned an empty verifyParam");
+            } else {
+              state.verifyParam = serializedVerifyParam;
+            }
+            if (typeof callback === "function") {
+              callback(response);
+            }
+            return response;
           },
           onBizResultCallback: (bizResult: unknown) => {
             if (bizResult === false) {
