@@ -97,6 +97,13 @@ function timeoutAfter<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 }
 
 async function installCaptcha(page: ZcodeCaptchaPage): Promise<void> {
+  try {
+    await page.addInitScript("window.__name = function(fn) { return fn; };");
+    await page.evaluate("window.__name = function(fn) { return fn; };");
+  } catch {
+    // Ignore init script fallback errors if unsupported by mock
+  }
+
   await page.evaluate((stateKey) => {
     const pageWindow = window as AliyunCaptchaWindow;
     document.body.innerHTML =
