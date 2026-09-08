@@ -240,6 +240,8 @@ async function waitForCaptchaResult(
 }
 
 export class ZcodeCaptchaSolver {
+  private currentToken: { verifyParam: string; region: string } | null = null;
+
   constructor(
     private readonly dependencies: ZcodeCaptchaSolverDependencies = defaultDependencies
   ) {}
@@ -267,9 +269,15 @@ export class ZcodeCaptchaSolver {
         })(),
         timeoutMs
       );
+      this.currentToken = result;
       return result;
     } finally {
       await page.close().catch(() => {});
     }
+  }
+
+  /** Clear any cached captcha result so the next solve obtains fresh verification. */
+  invalidate(): void {
+    this.currentToken = null;
   }
 }

@@ -24,7 +24,7 @@ type CaptchaSolveOptions = {
 /** The narrow solver contract makes browser captcha work injectable in tests. */
 export interface ZcodeCaptchaSolver {
   solve(options?: CaptchaSolveOptions): Promise<CaptchaToken>;
-  invalidate?: () => void | Promise<void>;
+  invalidate: () => void | Promise<void>;
 }
 
 export interface ZcodeDirectExecutorOptions {
@@ -110,7 +110,24 @@ function parseSsePayload(line: string): unknown | null {
 function normalizeChunk(payload: unknown, model: string): JsonRecord | null {
   const record = asRecord(payload);
   if (Object.keys(record).length === 0) return null;
-  if (record.error !== undefined) return record;
+  if (record.error !== undefined) {
+    const rawError = record.error;
+    if (typeof rawError === "string") {
+      return { ...record, error: sanitizeErrorMessage(rawError) };
+    }
+    const error = asRecord(rawError);
+    if (Object.keys(error).length === 0) return record;
+    return {
+      ...record,
+      error: {
+        ...error,
+        ...(typeof error.message === "string"
+          ? { message: sanitizeErrorMessage(error.message) }
+          : {}),
+        ...(typeof error.msg === "string" ? { msg: sanitizeErrorMessage(error.msg) } : {}),
+      },
+    };
+  }
   const choices = Array.isArray(record.choices) ? record.choices : undefined;
   if (choices) {
     return {
@@ -147,9 +164,16 @@ function createStreamingResponse(
   let finished = false;
   let abortHandler: (() => void) | undefined;
 
+  const cleanupAbortListener = () => {
+    if (signal && abortHandler) {
+      signal.removeEventListener("abort", abortHandler);
+      abortHandler = undefined;
+    }
+  };
   const cancelReader = (reason?: unknown) => {
     if (finished) return;
     finished = true;
+    cleanupAbortListener();
     void reader.cancel(reason).catch(() => undefined);
   };
   if (signal) {
@@ -175,6 +199,7 @@ function createStreamingResponse(
             if (chunk) controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
           }
           finished = true;
+          cleanupAbortListener();
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
           return;
@@ -186,7 +211,9 @@ function createStreamingResponse(
           const payload = parseSsePayload(line);
           if (payload === "[DONE]") {
             finished = true;
+            cleanupAbortListener();
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            cleanupAbortListener();
             controller.close();
             return;
           }
@@ -196,7 +223,12 @@ function createStreamingResponse(
         }
       } catch (error) {
         finished = true;
-        if (!signal?.aborted) controller.error(error);
+        cleanupAbortListener();
+        if (signal?.aborted) {
+          controller.close();
+          return;
+        }
+        controller.error(new Error(errorMessage(error) || "ZCode direct stream failed"));
       }
     },
     cancel(reason) {
@@ -278,7 +310,7 @@ export class ZcodeDirectExecutor extends BaseExecutor {
           const classification = classifyZcodeDirectError(upstream.status, errorData);
           if (classification.isCaptchaError && retries < MAX_CAPTCHA_RETRIES) {
             retries += 1;
-            await this.options.captchaSolver!.invalidate?.();
+            await this.options.captchaSolver!.invalidate();
             continue;
           }
           return input.stream

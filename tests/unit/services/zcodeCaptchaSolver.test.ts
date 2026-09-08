@@ -144,6 +144,11 @@ function createHarness(
 }
 
 describe("ZcodeCaptchaSolver", () => {
+  it("exposes invalidate for clearing the current captcha token", async () => {
+    const solver = new ZcodeCaptchaSolver();
+    assert.equal(typeof solver.invalidate, "function");
+    solver.invalidate();
+  });
   it("acquires a headed context, returns a fresh verify param, and closes the page", async () => {
     const harness = createHarness();
     const solver = new ZcodeCaptchaSolver(harness.deps);
@@ -154,7 +159,10 @@ describe("ZcodeCaptchaSolver", () => {
     assert.equal(harness.acquired.length, 1);
     assert.equal(harness.acquired[0]?.key, "zcode-captcha");
     assert.equal(harness.acquired[0]?.options.headless, false);
-    assert.equal(harness.scripts[0], "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js");
+    assert.equal(
+      harness.scripts[0],
+      "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"
+    );
     assert.equal(harness.closed, 1);
   });
 
@@ -240,7 +248,9 @@ describe("ZcodeCaptchaSolver", () => {
     await assert.rejects(
       solver.solve(),
       (error: unknown) =>
-        error instanceof Error && /script.*load/i.test(error.message) && /network unavailable/i.test(error.message)
+        error instanceof Error &&
+        /script.*load/i.test(error.message) &&
+        /network unavailable/i.test(error.message)
     );
     assert.equal(harness.closed, 1);
   });
