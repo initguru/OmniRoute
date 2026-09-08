@@ -239,6 +239,12 @@ async function waitForCaptchaResult(
   return state;
 }
 
+/**
+ * Single-use, on-demand Alibaba captcha solver. A certifyId/verifyParam is
+ * bound to one upstream turn and must never be reused; each solve opens a new
+ * page. `invalidate()` clears the diagnostic token reference after a rejected
+ * verification so no stale state survives into the next turn.
+ */
 export class ZcodeCaptchaSolver {
   private currentToken: { verifyParam: string; region: string } | null = null;
 
@@ -246,6 +252,7 @@ export class ZcodeCaptchaSolver {
     private readonly dependencies: ZcodeCaptchaSolverDependencies = defaultDependencies
   ) {}
 
+  /** Solve one turn's captcha; returned verification is not reusable across turns. */
   async solve(options?: { timeoutMs?: number }): Promise<{ verifyParam: string; region: string }> {
     const timeoutMs = resolveTimeout(options?.timeoutMs);
     const pooled = await this.dependencies.acquireBrowserContext(CAPTCHA_POOL_KEY, {

@@ -134,6 +134,58 @@ test("ZCode direct executor emits standard SSE and preserves upstream token usag
   assert.match(text, /data: \[DONE\]/);
 });
 
+test("ZCode direct executor sanitizes upstream streaming error messages", async () => {
+  const harness = solverHarness();
+  const unsafeMessage =
+    "upstream failed /Users/operator/.zcode/config.json\n    at /Users/operator/project/client.ts:42";
+  const sse = `data: ${JSON.stringify({ error: { message: unsafeMessage } })}\n\n`;
+  const executor = new ZcodeDirectExecutor({
+    authOptions: { apiKey: "direct-key" },
+    captchaSolver: harness.solver,
+    fetcher: async () => fetchResponse(sse, 200, "text/event-stream"),
+  });
+
+  const result = await executor.execute({ ...inputBase, stream: true });
+  const response = "response" in result ? result.response : result;
+  const text = await response.text();
+  assert.match(text, /upstream failed/);
+  assert.doesNotMatch(text, /\/Users\/operator\/\.zcode\/config\.json/);
+  assert.doesNotMatch(text, /at \/Users/);
+});
+
+test("ZCode direct executor cancels an aborted stream without hanging", async () => {
+  const harness = solverHarness();
+  const controller = new AbortController();
+  let cancelCalls = 0;
+  const upstreamBody = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelCalls += 1;
+    },
+  });
+  const executor = new ZcodeDirectExecutor({
+    authOptions: { apiKey: "direct-key" },
+    captchaSolver: harness.solver,
+    fetcher: async () =>
+      new Response(upstreamBody, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  });
+
+  const result = await executor.execute({ ...inputBase, stream: true, signal: controller.signal });
+  const response = "response" in result ? result.response : result;
+  const reader = response.body?.getReader();
+  assert.ok(reader);
+  const pendingRead = reader.read();
+  controller.abort(new Error("client disconnected"));
+  const readResult = await Promise.race([
+    pendingRead,
+    new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) =>
+      setTimeout(() => reject(new Error("stream hung")), 250)
+    ),
+  ]);
+  assert.ok(readResult.done || readResult.value !== undefined);
+  await reader.cancel();
+  assert.equal(cancelCalls, 1);
+});
+
 test("ZCode direct executor invalidates captcha and retries exactly once on code 3007", async () => {
   const harness = solverHarness(["expired-captcha", "fresh-captcha"]);
   let calls = 0;
