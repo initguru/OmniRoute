@@ -210,4 +210,15 @@ describe("ZCode Provider Registry Wiring", () => {
     assert.equal(formatQuotaLabel("glm-5.3"), "GLM-5.3");
     assert.equal(formatQuotaLabel("glm-5.3-flash"), "GLM-5.3-Flash");
   });
+
+  it("validates zcode and zc connections via validateProviderApiKey specialty validator", async () => {
+    const { validateProviderApiKey } = await import("../../src/lib/providers/validation.ts");
+    const zcodeRes = await validateProviderApiKey({ provider: "zcode" });
+    assert.equal(zcodeRes.valid, true);
+    assert.equal(zcodeRes.method, "zcode_session_verified");
+
+    const zcRes = await validateProviderApiKey({ provider: "zc" });
+    assert.equal(zcRes.valid, true);
+    assert.equal(zcRes.method, "zcode_session_verified");
+  });
 });

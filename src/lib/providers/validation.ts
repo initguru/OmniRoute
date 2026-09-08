@@ -112,6 +112,7 @@ import { validateAdobeFireflyProvider } from "./validation/adobeFirefly";
 import {
   validateV0VercelProvider,
   validateAuggieProvider,
+  validateZcodeProvider,
   validateCursorApiProvider,
   validateQoderProvider,
   validateKiroProvider,
@@ -222,6 +223,8 @@ export async function validateProviderApiKey({ provider, apiKey, providerSpecifi
     // for parity with the "jules" cloud-agent entry above — see #6142.
     devin: validateDevinCloudAgentProvider,
     auggie: validateAuggieProvider,
+    zcode: validateZcodeProvider,
+    zc: validateZcodeProvider,
     "cursor-api": validateCursorApiProvider,
     aihorde: validateAiHordeProvider,
     // #10522: registered under both the canonical id and the short alias — Firefly

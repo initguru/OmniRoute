@@ -134,14 +134,15 @@ test("ZcodeCaptchaSolver exposes solve and obtains a token through injected brow
   const result = await solver.solve({ timeoutMs: 500 });
 
   assert.deepEqual(result, { verifyParam: VALID_VERIFY_PARAM, region: "sgp" });
-  assert.deepEqual(harness.acquired, [{
-    key: "zcode-captcha",
-    options: {
-      cookieDomain: ".alicdn.com",
-      headless: false,
-      warmupUrl: "https://o.alicdn.com/",
+  assert.deepEqual(harness.acquired, [
+    {
+      key: "zcode-captcha",
+      options: {
+        cookieDomain: ".alicdn.com",
+        headless: false,
+      },
     },
-  }]);
+  ]);
   assert.equal(harness.scriptUrls.length, 1);
   assert.equal(harness.capturedOptions?.SceneId, "11xygtvd");
   assert.equal(harness.capturedOptions?.prefix, "no8xfe");
@@ -177,6 +178,9 @@ test("ZcodeCaptchaSolver rejects invalid timeout values before acquiring a brows
   const harness = createHarness();
   const solver = new ZcodeCaptchaSolver(harness.dependencies);
 
-  await assert.rejects(solver.solve({ timeoutMs: 0 }), /timeoutMs must be a positive finite number/);
+  await assert.rejects(
+    solver.solve({ timeoutMs: 0 }),
+    /timeoutMs must be a positive finite number/
+  );
   assert.equal(harness.acquired.length, 0);
 });

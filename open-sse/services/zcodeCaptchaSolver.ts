@@ -43,7 +43,7 @@ interface AliyunCaptchaOptions {
   slideStyle: { width: number; height: number };
   language: "cn";
   immediate: false;
-};
+}
 
 type AliyunCaptchaWindow = Window & {
   AliyunCaptchaConfig?: { region: string; prefix: string };
@@ -54,10 +54,7 @@ type AliyunCaptchaWindow = Window & {
 export type ZcodeCaptchaPage = Page;
 
 export interface ZcodeCaptchaSolverDependencies {
-  acquireBrowserContext(
-    key: string,
-    options: BrowserPoolContextOptions
-  ): Promise<PooledContext>;
+  acquireBrowserContext(key: string, options: BrowserPoolContextOptions): Promise<PooledContext>;
   openPage(pooled: PooledContext): Promise<ZcodeCaptchaPage>;
 }
 
@@ -212,7 +209,10 @@ async function installCaptcha(page: ZcodeCaptchaPage): Promise<void> {
   }
 }
 
-async function waitForCaptchaResult(page: ZcodeCaptchaPage, timeoutMs: number): Promise<CaptchaState> {
+async function waitForCaptchaResult(
+  page: ZcodeCaptchaPage,
+  timeoutMs: number
+): Promise<CaptchaState> {
   try {
     await page.waitForFunction(
       (stateKey) => {
@@ -240,14 +240,15 @@ async function waitForCaptchaResult(page: ZcodeCaptchaPage, timeoutMs: number): 
 }
 
 export class ZcodeCaptchaSolver {
-  constructor(private readonly dependencies: ZcodeCaptchaSolverDependencies = defaultDependencies) {}
+  constructor(
+    private readonly dependencies: ZcodeCaptchaSolverDependencies = defaultDependencies
+  ) {}
 
   async solve(options?: { timeoutMs?: number }): Promise<{ verifyParam: string; region: string }> {
     const timeoutMs = resolveTimeout(options?.timeoutMs);
     const pooled = await this.dependencies.acquireBrowserContext(CAPTCHA_POOL_KEY, {
       cookieDomain: CAPTCHA_COOKIE_DOMAIN,
       headless: false,
-      warmupUrl: "https://o.alicdn.com/",
     });
     const page = await this.dependencies.openPage(pooled);
 

@@ -61,6 +61,30 @@ export async function validateAuggieProvider() {
   return { valid: true, error: null, unsupported: false, method: result.version };
 }
 
+// zcode connects to the local ZCode Desktop application and upstream GLM plan.
+export async function validateZcodeProvider({ apiKey, providerSpecificData }: any = {}) {
+  const fs = await import("node:fs");
+  const entry =
+    process.env.ZCODE_SERVER_ENTRY || "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+  if (!fs.existsSync(entry)) {
+    return {
+      valid: false,
+      error: `ZCode Desktop app not found (${entry}). Please install ZCode Desktop from zcode.z.ai.`,
+      unsupported: false,
+    };
+  }
+  const { getZCodeUsage } = await import("@omniroute/open-sse/services/usage/zcode.ts");
+  const usage = await getZCodeUsage(undefined, apiKey, providerSpecificData);
+  if ("message" in usage) {
+    return {
+      valid: false,
+      error: usage.message,
+      unsupported: false,
+    };
+  }
+  return { valid: true, error: null, unsupported: false, method: "zcode_session_verified" };
+}
+
 export async function validateCursorApiProvider({ apiKey }: { apiKey?: string }) {
   const { exchangeCursorApiKey, CursorApiKeyExchangeError, isCursorApiKey } =
     await import("@omniroute/open-sse/services/cursorApiKeyAuth.ts");
