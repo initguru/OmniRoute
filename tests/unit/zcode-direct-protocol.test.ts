@@ -189,12 +189,22 @@ describe("ZCode direct protocol errors", () => {
     assert.equal(unusual.code, 3012);
   });
 
-  it("marks standard authentication failures and retains a safe message", () => {
-    const result = classifyZcodeDirectError(401, { error: { message: "invalid key" } });
-    assert.equal(result.isCaptchaError, false);
-    assert.equal(result.isUnusualActivity, false);
-    assert.equal(result.isAuthError, true);
-    assert.equal(result.message, "invalid key");
-    assert.equal(result.code, undefined);
+  it("uses the HTTP status as the fallback code for standard errors", () => {
+    for (const status of [400, 401, 403, 405, 429, 500]) {
+      const result = classifyZcodeDirectError(status, { error: { message: "request failed" } });
+      assert.equal(result.code, status, `expected fallback code ${status}`);
+      assert.equal(result.isAuthError, status === 401 || status === 403);
+    }
+  });
+
+  it("sanitizes upstream paths and stack traces in error messages", () => {
+    const result = classifyZcodeDirectError(500, {
+      message:
+        "Internal failure at /Users/operator/.zcode/config.json\\n    at execute (/srv/omniroute/server.js:42:7)",
+    });
+    assert.notEqual(result.message, "Internal failure at /Users/operator/.zcode/config.json");
+    assert.doesNotMatch(result.message, /\/Users\/operator/);
+    assert.doesNotMatch(result.message, /at execute \(/);
+    assert.equal(result.code, 500);
   });
 });

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { sanitizeErrorMessage } from "../utils/error.ts";
 
 const DEFAULT_BASE_URL = "https://zcode.z.ai/api/v1/zcode-plan";
 const DEFAULT_PROVIDER_ID = "builtin:zai-start-plan";
@@ -209,7 +210,9 @@ export function classifyZcodeDirectError(
   data: unknown
 ): ZcodeDirectErrorClassification {
   const code = findErrorCode(data);
-  const message = findErrorMessage(data) ?? `ZCode direct API request failed (${status})`;
+  const rawMessage = findErrorMessage(data) ?? `ZCode direct API request failed (${status})`;
+  const message = sanitizeErrorMessage(rawMessage) || `ZCode direct API request failed (${status})`;
+  const fallbackCode = standardErrorCode(status);
   return {
     isCaptchaError: code === 3007,
     isUnusualActivity: code === 3012,
@@ -217,8 +220,8 @@ export function classifyZcodeDirectError(
     message,
     ...(code === 3007 || code === 3012
       ? { code }
-      : standardErrorCode(status) && status >= 400 && status < 500 && code
-        ? { code }
+      : fallbackCode && status >= 400
+        ? { code: fallbackCode }
         : {}),
   };
 }
