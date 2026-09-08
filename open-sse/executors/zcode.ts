@@ -267,7 +267,7 @@ function shouldFallbackToStdio(result: ExecutorExecuteResult): boolean {
   const resp = responseFromExecutorResult(result);
   const errorStatusHeader = resp.headers.get("x-omniroute-error-status");
   const status = errorStatusHeader ? Number(errorStatusHeader) : resp.status;
-  return status === 401 || status === 403 || status >= 500;
+  return status === 401 || status === 403 || status === 404 || status === 405 || status >= 500;
 }
 
 function buildDirectExecutorOptions(

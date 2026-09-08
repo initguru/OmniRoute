@@ -794,6 +794,40 @@ test("ZCode falls back to the legacy app-server after direct infrastructure fail
   assert.equal((await response.json()).choices[0].message.content, "fake zcode response");
 });
 
+for (const status of [404, 405] as const) {
+  test(`ZCode falls back to the legacy app-server after direct ${status} error`, async () => {
+    const { ZcodeExecutor } = await loadZcodeExecutor();
+    const { ZcodeDirectExecutor } = await import("../../open-sse/executors/zcodeDirect.ts");
+    const direct = new ZcodeDirectExecutor({
+      authOptions: { apiKey: "direct-routing-key" },
+      captchaSolver: {
+        solve: async () => ({ verifyParam: "v".repeat(256), region: "sgp" }),
+        invalidate: () => undefined,
+      },
+      fetcher: async () =>
+        new Response(JSON.stringify({ message: `direct returned ${status}` }), { status }),
+    });
+    const executor = new ZcodeExecutor({
+      command: process.execPath,
+      args: [fixture],
+      cwd: process.cwd(),
+      requestTimeoutMs: 3000,
+      turnTimeoutMs: 3000,
+      captchaSolver: defaultCaptchaSolver,
+      directExecutorFactory: () => direct,
+    });
+    const result = await executor.execute({
+      model: "glm-5.2",
+      body: requestBody(),
+      stream: false,
+      credentials: {},
+    });
+    const response = "response" in result ? result.response : result;
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).choices[0].message.content, "fake zcode response");
+  });
+}
+
 test("ZCode does not fall back to stdio when direct execution is aborted", async () => {
   const { ZcodeExecutor } = await loadZcodeExecutor();
   let directExecuted = false;
