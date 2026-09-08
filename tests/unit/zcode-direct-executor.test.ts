@@ -235,3 +235,24 @@ test("ZCode direct executor returns sanitized errors when auth is unavailable", 
   assert.equal(body.error.type, "authentication_error");
   assert.doesNotMatch(body.error.message, /must not fetch|at /);
 });
+
+test("ZCode direct executor immediately returns 499 on pre-aborted request without solving captcha", async () => {
+  let solverCalled = false;
+  const controller = new AbortController();
+  controller.abort();
+  const executor = new ZcodeDirectExecutor({
+    authOptions: { apiKey: "direct-key" },
+    captchaSolver: {
+      solve: async () => {
+        solverCalled = true;
+        return { verifyParam: "v".repeat(256), region: "sgp" };
+      },
+      invalidate: () => undefined,
+    },
+  });
+
+  const result = await executor.execute({ ...inputBase, signal: controller.signal });
+  assert.equal(solverCalled, false);
+  const response = "response" in result ? result.response : result;
+  assert.equal(response.status, 499);
+});

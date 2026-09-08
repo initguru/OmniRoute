@@ -2,11 +2,35 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
 import { sanitizeErrorMessage } from "../utils/error.ts";
 
 const DEFAULT_BASE_URL = "https://zcode.z.ai/api/v1/zcode-plan";
 const DEFAULT_PROVIDER_ID = "builtin:zai-start-plan";
 const ZCODE_APP_VERSION = "3.11.2";
+export const ZCODE_MODEL_ALLOWLIST = new Set(ZCODE_MODELS.map((model) => model.id));
+export const DEFAULT_ZCODE_MODEL = ZCODE_MODELS[0]?.id || "glm-5.2";
+
+export type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: string };
+
+export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
+  const requested = typeof model === "string" ? model.trim() : "";
+  if (!requested) return { ok: true, model: DEFAULT_ZCODE_MODEL };
+  if (requested.startsWith("-")) {
+    return {
+      ok: false,
+      error: `Invalid ZCode model \"${requested}\": model must not start with \"-\".`,
+    };
+  }
+  const normalized = requested.startsWith("zcode/") ? requested.slice("zcode/".length) : requested;
+  if (!ZCODE_MODEL_ALLOWLIST.has(normalized)) {
+    return {
+      ok: false,
+      error: `Unknown ZCode model \"${requested}\". Supported models: ${[...ZCODE_MODEL_ALLOWLIST].join(", ")}.`,
+    };
+  }
+  return { ok: true, model: normalized };
+}
 
 export interface ZcodeDirectAuth {
   apiKey: string;
@@ -157,7 +181,9 @@ export function buildZcodeDirectBody(params: ZcodeDirectBodyParams): Record<stri
     }
   }
   if (params.isAnthropic) {
+    const existingMeta = asRecord(params.metadata);
     body.metadata = {
+      ...existingMeta,
       user_id: JSON.stringify({
         device_id: params.deviceId || "",
         account_uuid: "",

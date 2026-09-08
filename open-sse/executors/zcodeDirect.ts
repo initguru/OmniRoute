@@ -1,11 +1,11 @@
 import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult } from "./base.ts";
-import { resolveZcodeModel } from "./zcode.ts";
 import { ZcodeCaptchaSolver } from "../services/zcodeCaptchaSolver.ts";
 import {
   buildZcodeDirectBody,
   buildZcodeDirectHeaders,
   classifyZcodeDirectError,
   resolveZcodeDirectAuth,
+  resolveZcodeModel,
   type ZcodeDirectAuthOptions,
 } from "../services/zcodeDirectProtocol.ts";
 import { buildErrorBody, errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
@@ -215,7 +215,6 @@ function createStreamingResponse(
             finished = true;
             cleanupAbortListener();
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-            cleanupAbortListener();
             controller.close();
             return;
           }
@@ -275,6 +274,12 @@ export class ZcodeDirectExecutor extends BaseExecutor {
   }
 
   override async execute(input: ExecuteInput): Promise<ExecutorExecuteResult> {
+    if (input.signal?.aborted) {
+      return input.stream
+        ? sseErrorResponse(499, "Request aborted")
+        : errorResponse(499, "Request aborted");
+    }
+
     const resolution = resolveZcodeModel(input.model);
     if (!resolution.ok) {
       const message = "error" in resolution ? resolution.error : "Invalid ZCode model";

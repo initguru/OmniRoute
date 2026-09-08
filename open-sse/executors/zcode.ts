@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
 import {
   BaseExecutor,
   type ExecuteInput,
@@ -22,13 +21,14 @@ import {
   type ZcodeDirectExecutorOptions,
   type ZcodeCaptchaSolver as ZcodeDirectCaptchaSolver,
 } from "./zcodeDirect.ts";
+import { resolveZcodeModel, type ZcodeModelResolution } from "../services/zcodeDirectProtocol.ts";
+
+export { resolveZcodeModel, type ZcodeModelResolution };
 
 const ZCODE_URL = "zcode://app-server/stdio";
 const ZCODE_ANTHROPIC_BASE_URL = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
 const DEFAULT_PROVIDER_ID = "builtin:zai-start-plan";
 const DEFAULT_TURN_TIMEOUT_MS = 120_000;
-const ZCODE_MODEL_ALLOWLIST = new Set(ZCODE_MODELS.map((model) => model.id));
-const DEFAULT_ZCODE_MODEL = ZCODE_MODELS[0]?.id || "glm-5.2";
 
 const CAPTCHA_VERIFY_PARAM_HEADER = "x-aliyun-captcha-verify-param";
 const CAPTCHA_VERIFY_REGION_HEADER = "x-aliyun-captcha-verify-region";
@@ -38,7 +38,6 @@ const MAX_CAPTCHA_RETRIES = 1;
 type JsonRecord = Record<string, unknown>;
 type OpenAIMsg = { role?: string; content?: unknown };
 type ZcodeCommand = { command: string; args: string[] };
-type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: string };
 type ZcodeCaptcha = { verifyParam: string; region: string };
 type ZcodeCaptchaSolverLike = { solve(options?: { timeoutMs?: number }): Promise<ZcodeCaptcha> };
 type ZcodeModelRef = { providerId: string; modelId: string };
@@ -158,25 +157,6 @@ export function buildZcodePrompt(messages: OpenAIMsg[]): string {
     parts.push(`[${label}]\n${renderedText}`);
   }
   return parts.join("\n\n") || "(empty)";
-}
-
-export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
-  const requested = typeof model === "string" ? model.trim() : "";
-  if (!requested) return { ok: true, model: DEFAULT_ZCODE_MODEL };
-  if (requested.startsWith("-")) {
-    return {
-      ok: false,
-      error: `Invalid ZCode model \"${requested}\": model must not start with \"-\".`,
-    };
-  }
-  const normalized = requested.startsWith("zcode/") ? requested.slice("zcode/".length) : requested;
-  if (!ZCODE_MODEL_ALLOWLIST.has(normalized)) {
-    return {
-      ok: false,
-      error: `Unknown ZCode model \"${requested}\". Supported models: ${[...ZCODE_MODEL_ALLOWLIST].join(", ")}.`,
-    };
-  }
-  return { ok: true, model: normalized };
 }
 
 function defaultCommand(): ZcodeCommand {

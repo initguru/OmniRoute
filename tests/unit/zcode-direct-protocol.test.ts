@@ -10,6 +10,7 @@ import {
   classifyZcodeDirectError,
   resolveZcodeDeviceId,
   resolveZcodeDirectAuth,
+  resolveZcodeModel,
 } from "../../open-sse/services/zcodeDirectProtocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,7 +145,7 @@ describe("ZCode direct protocol bodies", () => {
     );
   });
 
-  it("builds an Anthropic Messages body with serialized user metadata", () => {
+  it("builds an Anthropic Messages body with serialized user metadata and preserves existing metadata", () => {
     assert.deepEqual(
       buildZcodeDirectBody({
         model: "GLM-5.3",
@@ -153,12 +154,14 @@ describe("ZCode direct protocol bodies", () => {
         deviceId: "device-mid-1",
         sessionId: "session-1",
         isAnthropic: true,
+        metadata: { custom_tag: "abc" },
       }),
       {
         model: "GLM-5.3",
         messages: [{ role: "user", content: "hello" }],
         max_tokens: 1024,
         metadata: {
+          custom_tag: "abc",
           user_id: JSON.stringify({
             device_id: "device-mid-1",
             account_uuid: "",
@@ -167,6 +170,16 @@ describe("ZCode direct protocol bodies", () => {
         },
       }
     );
+  });
+});
+
+describe("ZCode direct protocol models", () => {
+  it("resolves valid models and rejects unknown or dash-prefixed models", () => {
+    assert.deepEqual(resolveZcodeModel("glm-5.2"), { ok: true, model: "glm-5.2" });
+    assert.deepEqual(resolveZcodeModel("glm-5.3"), { ok: true, model: "glm-5.3" });
+    assert.deepEqual(resolveZcodeModel("zcode/glm-5.2"), { ok: true, model: "glm-5.2" });
+    assert.equal(resolveZcodeModel("-bad").ok, false);
+    assert.equal(resolveZcodeModel("unknown").ok, false);
   });
 });
 
