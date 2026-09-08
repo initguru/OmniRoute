@@ -129,7 +129,14 @@ export function notifyProviderUsageRecorded(
   provider: string | null | undefined,
   connectionId: string | null | undefined
 ): void {
-  if ((provider !== "antigravity" && provider !== "agy") || !connectionId) return;
+  if (
+    (provider !== "antigravity" &&
+      provider !== "agy" &&
+      provider !== "zcode" &&
+      provider !== "zc") ||
+    !connectionId
+  )
+    return;
   scheduleProviderLimitsPostUsageRefresh(connectionId);
 }
 

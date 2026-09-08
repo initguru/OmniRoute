@@ -75,7 +75,7 @@ export async function validateZcodeProvider({ apiKey, providerSpecificData }: an
   }
   const { getZCodeUsage } = await import("@omniroute/open-sse/services/usage/zcode.ts");
   const usage = await getZCodeUsage(undefined, apiKey, providerSpecificData);
-  if ("message" in usage) {
+  if (usage.message && !usage.quotas) {
     return {
       valid: false,
       error: usage.message,

@@ -96,11 +96,17 @@ function getOsCategory(): string {
   return "linux";
 }
 
+export interface ZCodeUsageResult {
+  plan?: string | null;
+  quotas?: Record<string, UsageQuota> | null;
+  message?: string | null;
+}
+
 export async function getZCodeUsage(
   _connectionId?: string,
   _apiKey?: string,
   _providerSpecificData?: Record<string, unknown>
-): Promise<Record<string, UsageQuota> | { message: string }> {
+): Promise<ZCodeUsageResult> {
   const credsPath = getZCodeProfilePath("credentials.json");
 
   if (!fs.existsSync(credsPath)) {
@@ -212,5 +218,10 @@ export async function getZCodeUsage(
     };
   }
 
-  return quotas;
+  const plan = json.data?.plans?.[0]?.name || "ZCode Start Plan";
+
+  return {
+    plan,
+    quotas,
+  };
 }
