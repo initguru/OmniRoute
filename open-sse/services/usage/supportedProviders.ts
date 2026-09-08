@@ -82,4 +82,7 @@ export const USAGE_SUPPORTED_PROVIDERS: readonly string[] = [
   "openrouter",
   // Devin CLI agentic quota (Codeium seat-management GetUserStatus, protobuf)
   "devin-cli",
+  // ZCode (Z.ai Coding Plan) Start Plan / billing balance
+  "zcode",
+  "zc",
 ];

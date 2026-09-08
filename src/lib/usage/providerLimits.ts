@@ -91,6 +91,9 @@ const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   "agentrouter",
   // OpenRouter API key → /key limits + /credits account balance
   "openrouter",
+  // ZCode (Z.ai Coding Plan) Start Plan / billing balance
+  "zcode",
+  "zc",
 ]);
 const DEFAULT_PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES = 70;
 const PROVIDER_LIMITS_AUTO_SYNC_SETTING_KEY = "provider_limits_auto_sync_last_run";
@@ -175,6 +178,11 @@ function shouldRefreshProviderLimitsCache(
 
 export function isSupportedUsageConnection(connection: ProviderConnectionLike | null): boolean {
   if (!connection?.provider) return false;
+
+  // Local/no-auth providers that support usage from local profiles (e.g. zcode)
+  if (connection.provider === "zcode" || connection.provider === "zc") {
+    return true;
+  }
 
   if (connection.authType === "oauth") {
     return supportsProviderQuota(connection.provider, connection);

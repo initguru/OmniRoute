@@ -37,6 +37,8 @@ const QUOTA_LABEL_MAP: Record<string, string> = {
   banked_reset_credits: "Banked Reset Credits",
   gemini_weekly: "Gemini Weekly",
   claude_gpt_weekly: "Claude & GPT Weekly",
+  "glm-5.3": "GLM-5.3",
+  "glm-5.3-flash": "GLM-5.3-Flash",
 };
 
 function toRecord(value: unknown): Record<string, unknown> {

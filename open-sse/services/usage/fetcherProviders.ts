@@ -86,6 +86,9 @@ export const USAGE_FETCHER_PROVIDERS = [
   "kilocode",
   // Devin CLI agentic quota (Codeium seat-management GetUserStatus, protobuf)
   "devin-cli",
+  // ZCode (Z.ai Coding Plan) Start Plan / billing balance
+  "zcode",
+  "zc",
 ] as const;
 
 export type UsageFetcherProvider = (typeof USAGE_FETCHER_PROVIDERS)[number];
