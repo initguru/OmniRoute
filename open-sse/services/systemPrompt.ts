@@ -201,7 +201,10 @@ function markInjected(body: Record<string, unknown>): void {
  * @param {object} [opts] - `{ targetFormat }` from the resolved wire target
  * @returns {object} Modified body
  */
-export function injectSystemPromptPostTranslation(body, opts?: { targetFormat?: string }) {
+export function injectSystemPromptPostTranslation(
+  body: any,
+  opts?: { targetFormat?: string }
+): any {
   const cfg = getConfig();
   if (!cfg.enabled) return body;
   const prefix = cfg.prefixPrompt || "";
@@ -224,7 +227,7 @@ export function injectSystemPromptPostTranslation(body, opts?: { targetFormat?: 
   if (targetFormat === "claude" || result.system !== undefined) {
     const hasSystemRole =
       Array.isArray(result.messages) &&
-      result.messages.some((m) => m && (m.role === "system" || m.role === "developer"));
+      result.messages.some((m: any) => m && (m.role === "system" || m.role === "developer"));
     if (!hasSystemRole) {
       if (typeof result.system === "string") {
         let sys = result.system;
@@ -352,7 +355,10 @@ export function injectSystemPromptPostTranslation(body, opts?: { targetFormat?: 
  * @param {object} [opts] - `{ targetFormat }` of the resolved wire target
  * @returns {object} Modified body (or the original when gated out)
  */
-export function injectSystemPromptPreTranslation(body, opts?: { targetFormat?: string }) {
+export function injectSystemPromptPreTranslation(
+  body: any,
+  opts?: { targetFormat?: string }
+): any {
   const cfg = getConfig();
   if (!cfg.enabled) return body;
   const prefix = cfg.prefixPrompt || "";
@@ -425,7 +431,8 @@ export function injectSystemPromptPreTranslation(body, opts?: { targetFormat?: s
   if (Array.isArray(result.messages)) {
     result.messages = [...result.messages];
     const sysIdx = result.messages.findIndex(
-      (m) => m && (m.role === "system" || m.role === "developer")
+      (m: Record<string, unknown> | null | undefined) =>
+        m && (m.role === "system" || m.role === "developer")
     );
     if (sysIdx >= 0) {
       result.messages[sysIdx] = { ...result.messages[sysIdx] };
