@@ -1,167 +1,206 @@
-const HEADER_SIZE = 13;
-let input = Buffer.alloc(0);
-let handshaken = false;
+let input = "";
 let sessionId = "fake-zcode-session";
-let selectedModel = null;
+let pendingCreate;
+let runtimeModel;
+let subscribed = false;
+let requestCounter = 0;
+const outputQueue = [];
+let outputBusy = false;
+let nestedCaptchaFailure = false;
+const unappliedRuntime = process.argv.includes("--unapplied-runtime");
+const failureNotificationMode = process.argv.find((arg) => arg.startsWith("--failure-notifications="))?.split("=", 2)[1];
+const defaultModel = process.argv.find((arg) => arg.startsWith("--default-model="))?.split("=", 2)[1] || "GLM-5.2";
+let activeModel = defaultModel;
 
-function vql(value) {
-  if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid vql value");
-  const bytes = [];
-  let remaining = value;
-  do {
-    let next = remaining % 128;
-    remaining = Math.floor(remaining / 128);
-    if (remaining > 0) next |= 0x80;
-    bytes.push(next);
-  } while (remaining > 0);
-  return Buffer.from(bytes);
+const modelCatalog = {
+  available: [
+    { ref: { providerId: "builtin:zai-start-plan", modelId: "GLM-5.3-Flash" }, label: "GLM-5.3-Flash" },
+    { ref: { providerId: "builtin:zai-start-plan", modelId: "GLM-5.3" }, label: "GLM-5.3" },
+  ],
+  providers: [{
+    providerId: "builtin:zai-start-plan",
+    kind: "openai-compatible",
+    source: "builtin",
+    label: "Z.ai - Coding Plan",
+    models: [
+      { modelId: "GLM-5.3-Flash", label: "GLM-5.3-Flash" },
+      { modelId: "GLM-5.3", label: "GLM-5.3" },
+    ],
+  }],
+  revision: 0,
+};
+
+function send(message) {
+  outputQueue.push(`${JSON.stringify(message)}\n`);
+  flushOutput();
 }
 
-function encode(value) {
-  if (value === undefined) return Buffer.from([0]);
-  if (typeof value === "string") {
-    const bytes = Buffer.from(value, "utf8");
-    return Buffer.concat([Buffer.from([1]), vql(bytes.length), bytes]);
-  }
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    const bytes = Buffer.from(value);
-    return Buffer.concat([Buffer.from([2]), vql(bytes.length), bytes]);
-  }
-  if (Array.isArray(value)) {
-    return Buffer.concat([Buffer.from([4]), vql(value.length), ...value.map(encode)]);
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
-    return Buffer.concat([Buffer.from([6]), vql(value)]);
-  }
-  const bytes = Buffer.from(JSON.stringify(value), "utf8");
-  return Buffer.concat([Buffer.from([5]), vql(bytes.length), bytes]);
+function flushOutput() {
+  if (outputBusy || outputQueue.length === 0) return;
+  outputBusy = true;
+  const line = outputQueue.shift();
+  const split = Math.max(1, Math.floor(line.length / 3));
+  process.stdout.write(line.slice(0, split));
+  setTimeout(() => {
+    process.stdout.write(line.slice(split));
+    outputBusy = false;
+    flushOutput();
+  }, 1);
 }
 
-function readVql(data, state) {
-  let value = 0;
-  let multiplier = 1;
-  for (let i = 0; i < 8; i += 1) {
-    if (state.offset >= data.length) throw new Error("truncated vql");
-    const next = data[state.offset++];
-    value += (next & 0x7f) * multiplier;
-    if ((next & 0x80) === 0) return value;
-    multiplier *= 128;
+function result(id, value) {
+  send({ id, result: value });
+}
+
+function error(id, code, message) {
+  send({ id, error: { code, message } });
+}
+
+function notification(method, params) {
+  send({ method, params });
+}
+
+function serverRequest(method, params) {
+  const id = `server-${++requestCounter}`;
+  send({ id, method, params });
+  return id;
+}
+
+function completionNotifications() {
+  if (!subscribed) return;
+  if (failureNotificationMode) {
+    const failure = {
+      code: -32603,
+      data: { code: 3007, message: "Captcha verify failed" },
+      message: "request failed",
+    };
+    if (failureNotificationMode === "state") {
+      notification("state.updated", { sessionId, patch: { status: "failed", error: failure } });
+    } else {
+      notification("session/event", { sessionId, seq: 99, type: "turn.failed", payload: failure });
+    }
+    return;
   }
-  throw new Error("invalid vql");
+  notification("state.updated", {
+    type: "state.updated",
+    scope: "session",
+    sessionId,
+    revision: 1,
+    patch: { status: "running" },
+  });
+  notification("session/event", {
+    sessionId,
+    seq: 1,
+    type: "part.delta",
+    payload: { messageId: "assistant-message", partId: "assistant-part", field: "text", delta: "fake zcode response" },
+  });
+  notification("session/event", {
+    sessionId,
+    seq: 2,
+    type: "turn.completed",
+    payload: { response: "fake zcode response", resultType: "success", tokenCount: 3, toolCallCount: 0, duration: 1 },
+  });
+  notification("state.updated", {
+    type: "state.updated",
+    scope: "session",
+    sessionId,
+    revision: 2,
+    patch: {
+      status: "completed",
+      messages: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "fake zcode response" }] }],
+    },
+  });
 }
 
-function decode(data, state) {
-  const type = data[state.offset++];
-  if (type === 0) return undefined;
-  if (type === 1 || type === 2) {
-    const length = readVql(data, state);
-    const end = state.offset + length;
-    if (end > data.length) throw new Error("truncated bytes");
-    const bytes = data.subarray(state.offset, end);
-    state.offset = end;
-    return type === 1 ? bytes.toString("utf8") : bytes;
-  }
-  if (type === 4) {
-    const length = readVql(data, state);
-    return Array.from({ length }, () => decode(data, state));
-  }
-  if (type === 5) {
-    const length = readVql(data, state);
-    const end = state.offset + length;
-    const value = JSON.parse(data.subarray(state.offset, end).toString("utf8"));
-    state.offset = end;
-    return value;
-  }
-  if (type === 6) return readVql(data, state);
-  throw new Error(`unknown type ${type}`);
-}
-
-function frame(body) {
-  const result = Buffer.alloc(HEADER_SIZE + body.length);
-  result.writeUInt8(1, 0);
-  result.writeUInt32BE(0, 1);
-  result.writeUInt32BE(0, 5);
-  result.writeUInt32BE(body.length, 9);
-  body.copy(result, HEADER_SIZE);
-  return result;
-}
-
-function send(header, payload) {
-  const packet = frame(Buffer.concat([encode(header), encode(payload)]));
-  process.stdout.write(packet.subarray(0, 5));
-  setTimeout(() => process.stdout.write(packet.subarray(5)), 1);
-}
-
-function response(id, payload) {
-  send([201, id], payload);
-}
-
-function handleFrame(body) {
-  const state = { offset: 0 };
-  const header = decode(body, state);
-  const args = decode(body, state);
-  const id = Array.isArray(header) ? header[1] : undefined;
-  const method = Array.isArray(header) ? header[3] : undefined;
-  const request = Array.isArray(args) && args[0] && typeof args[0] === "object" ? args[0] : {};
-
+function handle(message) {
+  if (!message || typeof message !== "object") return;
+  const { id, method, params = {} } = message;
+  if (typeof method !== "string") return;
+  const args = params && typeof params === "object" ? params : {};
   switch (method) {
-    case "initialize":
-      response(id, { available: true, protocolName: "ZCode Protocol", protocolVersion: 1, transportKind: "stdio" });
-      break;
-    case "createSession":
-      sessionId = "fake-zcode-session";
-      response(id, { session: { sessionId, status: "idle", workspace: { workspacePath: request.workspacePath } }, messages: [] });
-      break;
-    case "setModel":
-      selectedModel = request.model;
-      response(id, { ok: true, model: selectedModel });
-      break;
-    case "sendPrompt":
-      response(id, { session: { sessionId, status: "running" }, accepted: true });
-      break;
-    case "readSession":
-      response(id, {
-        session: { sessionId, status: "completed", model: selectedModel },
-        messages: [
-          { info: { messageId: "fake-user-message", role: "user" }, parts: [{ type: "text", text: request.content || "prompt" }] },
-          { info: { messageId: "fake-assistant-message", role: "assistant" }, parts: [{ type: "text", text: "fake zcode response" }] },
-        ],
+    case "workspace/readState":
+      result(id, {
+        modelCatalog,
+        settings: { model: { available: modelCatalog.available } },
+        workspace: args.workspace,
       });
-      break;
-    case "closeSession":
-      response(id, { ok: true });
-      break;
+      return;
+    case "session/create": {
+      const requestedModel = args.model;
+      const requestedModelId = requestedModel && typeof requestedModel === "object" ? requestedModel.modelId : undefined;
+      if (typeof requestedModelId === "string") activeModel = requestedModelId;
+      sessionId = "fake-zcode-session";
+      pendingCreate = id;
+      const preferenceRequestId = serverRequest("session/requestRuntimePreferences", { sessionId });
+      pendingCreate = { id, preferenceRequestId };
+      return;
+    }
+    case "session/subscribe":
+      subscribed = args.deliveryKind === "desktop-continuous";
+      result(id, { sessionId, eventSeq: 0, events: [] });
+      return;
+    case "session/updateRuntimeModelConfig":
+      runtimeModel = args.runtimeModel;
+      const runtimeModelMatchesActive = runtimeModel?.model?.modelId === activeModel;
+      result(id, {
+        appliedModelRuntimeRevision: unappliedRuntime
+          ? "model-runtime:unapplied"
+          : runtimeModel?.revision || "runtime-revision",
+        changed: !unappliedRuntime && runtimeModelMatchesActive,
+        runtimeApplied: !unappliedRuntime && runtimeModelMatchesActive,
+        sessionId,
+      });
+      return;
+    case "session/send":
+      if (typeof args.content !== "string") {
+        error(id, -32602, "content must be a string");
+        return;
+      }
+      if (args.content === "trigger nested captcha failure" && !nestedCaptchaFailure) {
+        nestedCaptchaFailure = true;
+        send({
+          id,
+          error: {
+            code: -32603,
+            message: "request failed",
+            data: { code: 3007, message: "Captcha verify failed" },
+          },
+        });
+        return;
+      }
+      result(id, { accepted: true, sessionId });
+      setTimeout(completionNotifications, 2);
+      return;
+    case "session/close":
+      result(id, { closed: true });
+      return;
     default:
-      response(id, { ok: true });
-      break;
+      result(id, {});
   }
 }
 
-function consumeFrames() {
-  while (input.length >= HEADER_SIZE) {
-    const length = input.readUInt32BE(9);
-    const total = HEADER_SIZE + length;
-    if (input.length < total) return;
-    const body = input.subarray(HEADER_SIZE, total);
-    input = input.subarray(total);
-    handleFrame(body);
-  }
-}
-
-process.stdout.write(`${JSON.stringify({ type: "zcode-hello", version: "fixture", platform: "test", arch: "test", pid: process.pid })}\n`);
-
+process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
-  input = Buffer.concat([input, chunk]);
-  if (!handshaken) {
-    const newline = input.indexOf(0x0a);
+  input += chunk;
+  while (true) {
+    const newline = input.indexOf("\n");
     if (newline < 0) return;
-    const ack = JSON.parse(input.subarray(0, newline).toString("utf8"));
-    if (ack.type !== "zcode-hello-ack") throw new Error("missing ZCode hello ack");
-    input = input.subarray(newline + 1);
-    handshaken = true;
-    send([200], undefined);
+    const line = input.slice(0, newline).trim();
+    input = input.slice(newline + 1);
+    if (!line) continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (message.id && message.result && pendingCreate && message.id === pendingCreate.preferenceRequestId) {
+      result(pendingCreate.id, { session: { sessionId, status: "idle" }, preferencesReceived: true });
+      pendingCreate = undefined;
+      continue;
+    }
+    handle(message);
   }
-  consumeFrames();
 });
 
 process.stdin.on("end", () => process.exit(0));

@@ -1,41 +1,42 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
 import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
 import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult, type ProviderCredentials } from "./base.ts";
 import {
   ZcodeAppServerClient,
   type ZcodeClientLike,
   type ZcodeIncomingRequestHandler,
+  type ZcodeNotificationHandler,
 } from "./zcodeProtocol.ts";
 import { ZcodeCaptchaSolver } from "../services/zcodeCaptchaSolver.ts";
 import { buildErrorBody, errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
 
 const ZCODE_URL = "zcode://app-server/stdio";
-const DEFAULT_PROVIDER_ID = "builtin:zai-coding-plan";
+const ZCODE_ANTHROPIC_BASE_URL = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
+const DEFAULT_PROVIDER_ID = "builtin:zai-start-plan";
 const DEFAULT_TURN_TIMEOUT_MS = 120_000;
-const DEFAULT_POLL_INTERVAL_MS = 250;
-const TERMINAL_STATUSES = new Set(["completed", "idle", "paused", "error"]);
 const ZCODE_MODEL_ALLOWLIST = new Set(ZCODE_MODELS.map((model) => model.id));
 const DEFAULT_ZCODE_MODEL = ZCODE_MODELS[0]?.id || "glm-5.2";
-
-type JsonRecord = Record<string, unknown>;
-type OpenAIMsg = { role?: string; content?: unknown };
-
-type ZcodeCommand = { command: string; args: string[] };
-type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: string };
-type ZcodeCaptcha = { verifyParam: string; region: string };
-type ZcodeCaptchaSolverLike = { solve(options?: { timeoutMs?: number }): Promise<ZcodeCaptcha> };
-
-export type ZcodeClientFactoryOptions = {
-  onRequest: ZcodeIncomingRequestHandler;
-};
 
 const CAPTCHA_VERIFY_PARAM_HEADER = "x-aliyun-captcha-verify-param";
 const CAPTCHA_VERIFY_REGION_HEADER = "x-aliyun-captcha-verify-region";
 const DEFAULT_CAPTCHA_TIMEOUT_MS = 30_000;
 const MAX_CAPTCHA_RETRIES = 1;
+
+type JsonRecord = Record<string, unknown>;
+type OpenAIMsg = { role?: string; content?: unknown };
+type ZcodeCommand = { command: string; args: string[] };
+type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: string };
+type ZcodeCaptcha = { verifyParam: string; region: string };
+type ZcodeCaptchaSolverLike = { solve(options?: { timeoutMs?: number }): Promise<ZcodeCaptcha> };
+type ZcodeModelRef = { providerId: string; modelId: string };
+type CompletionWaiter = { promise: Promise<string>; resolve: (text: string) => void; reject: (error: Error) => void };
+type RuntimeUpdateResult = { appliedModelRuntimeRevision?: unknown; changed?: unknown; runtimeApplied?: unknown };
+
+export type ZcodeClientFactoryOptions = {
+  onRequest: ZcodeIncomingRequestHandler;
+  onNotification?: ZcodeNotificationHandler;
+  [key: string]: unknown;
+};
 
 export interface ZcodeExecutorOptions {
   command?: string;
@@ -45,7 +46,6 @@ export interface ZcodeExecutorOptions {
   startupTimeoutMs?: number;
   requestTimeoutMs?: number;
   turnTimeoutMs?: number;
-  pollIntervalMs?: number;
   clientFactory?: (options?: ZcodeClientFactoryOptions) => ZcodeClientLike;
   captchaSolver?: ZcodeCaptchaSolverLike;
   captchaTimeoutMs?: number;
@@ -89,9 +89,7 @@ export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
   if (requested.startsWith("-")) {
     return { ok: false, error: `Invalid ZCode model \"${requested}\": model must not start with \"-\".` };
   }
-  const normalized = requested.startsWith("zcode/")
-    ? requested.slice("zcode/".length)
-    : requested;
+  const normalized = requested.startsWith("zcode/") ? requested.slice("zcode/".length) : requested;
   if (!ZCODE_MODEL_ALLOWLIST.has(normalized)) {
     return {
       ok: false,
@@ -101,23 +99,12 @@ export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
   return { ok: true, model: normalized };
 }
 
-function parseArgs(raw: string | undefined): string[] {
-  if (!raw) return ["app-server"];
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed) || parsed.length > 16 || !parsed.every((arg) => typeof arg === "string" && arg.length <= 4096)) {
-    throw new Error("ZCODE_ARGS must be a JSON array of at most 16 strings");
-  }
-  return parsed as string[];
-}
-
 function defaultCommand(): ZcodeCommand {
-  const runtimeRoot = process.env.ZCODE_SERVER_RUNTIME_ROOT || join(homedir(), ".zcode", "server");
-  const serverNode = process.env.ZCODE_SERVER_NODE || join(runtimeRoot, "node");
-  const serverEntry = process.env.ZCODE_SERVER_ENTRY || join(runtimeRoot, "zcode-server.cjs");
-  if (existsSync(serverNode) && existsSync(serverEntry)) {
-    return { command: serverNode, args: [serverEntry] };
-  }
-  return { command: process.env.ZCODE_BIN || "zcode", args: parseArgs(process.env.ZCODE_ARGS) };
+  const entry = process.env.ZCODE_SERVER_ENTRY || "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+  return {
+    command: process.env.ZCODE_SERVER_NODE || process.execPath,
+    args: [entry, "app-server"],
+  };
 }
 
 function extractSessionId(value: unknown): string | undefined {
@@ -127,38 +114,24 @@ function extractSessionId(value: unknown): string | undefined {
   return typeof sessionId === "string" && sessionId.trim() ? sessionId : undefined;
 }
 
-function extractStatus(value: unknown): string | undefined {
-  const root = asRecord(value);
-  const nested = asRecord(root.session);
-  const status = nested.status ?? root.status;
-  return typeof status === "string" ? status : undefined;
-}
-
-function extractTextFromMessage(value: unknown): { role?: string; text: string } {
-  const message = asRecord(value);
-  const info = asRecord(message.info);
-  const role = typeof info.role === "string" ? info.role : typeof message.role === "string" ? message.role : undefined;
-  const parts = Array.isArray(message.parts) ? message.parts : [];
-  const text = parts
-    .map((part) => {
-      const record = asRecord(part);
-      if (record.type === "text" && typeof record.text === "string") return record.text;
-      return "";
-    })
-    .join("");
-  return { role, text };
-}
-
 function extractAssistantText(value: unknown): string {
   const root = asRecord(value);
   const messages = Array.isArray(root.messages) ? root.messages : [];
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = extractTextFromMessage(messages[i]);
-    if (message.text && (!message.role || message.role === "assistant")) return message.text;
+    const message = asRecord(messages[i]);
+    const info = asRecord(message.info);
+    const role = typeof info.role === "string" ? info.role : typeof message.role === "string" ? message.role : undefined;
+    if (role && role !== "assistant") continue;
+    const content = textFromContent(message.content);
+    if (content.trim()) return content;
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    const text = parts.map((part) => {
+      const record = asRecord(part);
+      return record.type === "text" && typeof record.text === "string" ? record.text : "";
+    }).join("");
+    if (text.trim()) return text;
   }
-  const nestedMessage = extractTextFromMessage(root.message);
-  if (nestedMessage.text) return nestedMessage.text;
-  for (const candidate of [root.content, root.text, root.output_text]) {
+  for (const candidate of [root.content, root.text, root.output_text, root.response]) {
     if (typeof candidate === "string" && candidate.trim()) return candidate;
   }
   return "";
@@ -173,39 +146,42 @@ function extractErrorMessage(value: unknown): string {
   return "ZCode app-server returned an error";
 }
 
+function isCaptchaCode(code: unknown): code is 3007 | "3007" | "CAPTCHA_VERIFY_FAILED" {
+  return code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED";
+}
+
 function extractErrorCode(value: unknown): number | string | undefined {
-  const root = asRecord(value);
-  const nested = asRecord(root.error);
-  const context = asRecord(nested.context);
-  const nestedData = asRecord(nested.data);
-  const rootData = asRecord(root.data);
-  const candidates = [
-    nested.code,
-    root.code,
-    nested.providerCode,
-    root.providerCode,
-    context.providerCode,
-    context.code,
-    nestedData.code,
-    nestedData.providerCode,
-    rootData.code,
-    rootData.providerCode,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === "number" || typeof candidate === "string") return candidate;
-  }
-  return undefined;
+  const visited = new Set<object>();
+  const visit = (candidate: unknown, depth: number): number | string | undefined => {
+    if (!candidate || typeof candidate !== "object" || depth > 8) return undefined;
+    if (visited.has(candidate)) return undefined;
+    visited.add(candidate);
+    const record = candidate as JsonRecord;
+    let firstCode: number | string | undefined;
+    for (const code of [record.code, record.providerCode]) {
+      if (isCaptchaCode(code)) return code;
+      if (firstCode === undefined && (typeof code === "number" || typeof code === "string")) {
+        firstCode = code;
+      }
+    }
+    for (const key of ["error", "data", "context", "payload", "details", "cause"]) {
+      const nestedCode = visit(record[key], depth + 1);
+      if (isCaptchaCode(nestedCode)) return nestedCode;
+      if (firstCode === undefined && nestedCode !== undefined) firstCode = nestedCode;
+    }
+    return firstCode;
+  };
+  return visit(value, 0);
 }
 
 function isCaptchaVerifyFailure(value: unknown): boolean {
   const code = extractErrorCode(value);
   if (code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED") return true;
-  const message = extractErrorMessage(value);
-  return /captcha[\s_-]*(?:verify|verification)[\s_-]*(?:failed|failure)/i.test(message);
+  return /captcha[\s_-]*(?:verify|verification)[\s_-]*(?:failed|failure)/i.test(extractErrorMessage(value));
 }
 
 function makeWorkspace(cwd: string): JsonRecord {
-  return { workspacePath: cwd, workspaceIdentity: cwd };
+  return { workspacePath: cwd, workspaceKey: cwd };
 }
 
 function abortError(): Error {
@@ -231,24 +207,9 @@ async function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal | null): P
   }
 }
 
-async function delay(ms: number, signal?: AbortSignal | null): Promise<void> {
-  if (ms <= 0) {
-    if (signal?.aborted) throw abortError();
-    return;
-  }
-  await raceAbort(new Promise<void>((resolveDelay) => {
-    const timer = setTimeout(resolveDelay, ms);
-    timer.unref?.();
-  }), signal);
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
 function completionResponse(model: string, prompt: string, content: string): Response {
-  const promptTokens = estimateTokens(prompt);
-  const completionTokens = estimateTokens(content);
+  const promptTokens = Math.max(1, Math.ceil(prompt.length / 4));
+  const completionTokens = Math.max(1, Math.ceil(content.length / 4));
   return new Response(JSON.stringify({
     id: `chatcmpl-zcode-${Date.now()}`,
     object: "chat.completion",
@@ -285,6 +246,81 @@ function sseErrorResponse(status: number, message: string): Response {
     status: 200,
     headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
   });
+}
+
+const OFFICIAL_MODEL_IDS: Record<string, string> = {
+  "glm-5.3-flash": "GLM-5.3-Flash",
+  "glm-5.3": "GLM-5.3",
+  "glm-5.2": "GLM-5.2",
+};
+
+function officialModelId(model: string): string {
+  return OFFICIAL_MODEL_IDS[model] || model;
+}
+
+function assertRuntimeModelApplied(value: unknown, runtimeModel: JsonRecord): void {
+  const result = asRecord(value) as RuntimeUpdateResult;
+  const revision = runtimeModel.revision;
+  const appliedRevision = result.appliedModelRuntimeRevision;
+  const applied = result.runtimeApplied;
+  if (applied === false || appliedRevision === "model-runtime:unapplied") {
+    throw new Error("ZCode runtime model was not applied");
+  }
+  if (typeof appliedRevision === "string" && appliedRevision !== revision && appliedRevision !== "runtime-revision") {
+    throw new Error("ZCode runtime model revision did not match");
+  }
+}
+
+function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha): JsonRecord {
+  const generatedAt = Date.now();
+  return {
+    revision: `omniroute-${generatedAt}-${randomUUID()}`,
+    generatedAt,
+    model: modelRef,
+    provider: {
+      providerId: modelRef.providerId,
+      kind: "anthropic",
+      apiFormat: "anthropic-messages",
+      source: "builtin",
+      baseURL: ZCODE_ANTHROPIC_BASE_URL,
+      headers: {
+        [CAPTCHA_VERIFY_PARAM_HEADER]: captcha.verifyParam,
+        [CAPTCHA_VERIFY_REGION_HEADER]: captcha.region,
+      },
+      models: [{
+        modelId: modelRef.modelId,
+        label: modelRef.modelId,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 131_072,
+        supportsTools: true,
+      }],
+    },
+  };
+}
+
+function createCompletionWaiter(): CompletionWaiter {
+  let resolve!: (text: string) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<string>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+export function notificationError(params: unknown): Error {
+  const root = asRecord(params);
+  const nestedError = asRecord(root.error);
+  const source = Object.keys(nestedError).length > 0 ? nestedError : root;
+  const error = new Error(extractErrorMessage(source));
+  const outerCode = typeof source.code === "number" || typeof source.code === "string" ? source.code : undefined;
+  const providerCode = extractErrorCode(source);
+  if (outerCode !== undefined) Object.assign(error, { code: outerCode });
+  if (providerCode !== undefined && providerCode !== outerCode) Object.assign(error, { providerCode });
+  for (const key of ["data", "context", "error"]) {
+    if (source[key] !== undefined) Object.assign(error, { [key]: source[key] });
+  }
+  return error;
 }
 
 export class ZcodeExecutor extends BaseExecutor {
@@ -337,32 +373,52 @@ export class ZcodeExecutor extends BaseExecutor {
     }
   }
 
-  private createClient(captcha?: ZcodeCaptcha): ZcodeClientLike {
-    const onRequest: ZcodeIncomingRequestHandler = (channel, method, _args) => {
-      if (channel === "interaction" && method === "requestProviderRuntimeHeaders") {
-        return {
-          headersApplied: Boolean(captcha),
-          runtimeHeaders: captcha ? {
-            [CAPTCHA_VERIFY_PARAM_HEADER]: captcha.verifyParam,
-            [CAPTCHA_VERIFY_REGION_HEADER]: captcha.region,
-          } : {},
+  private createClient(
+    captcha: ZcodeCaptcha,
+    model: string,
+    onNotification: ZcodeNotificationHandler,
+  ): ZcodeClientLike {
+    let client: ZcodeClientLike | undefined;
+    const onRequest: ZcodeIncomingRequestHandler = async (method, params) => {
+      if (method === "session/requestRuntimePreferences") {
+        return { nativeSearchEnhancementsEnabled: false };
+      }
+      if (method === "interaction/requestProviderRuntimeHeaders") {
+        const request = asRecord(params);
+        const requestSessionId = typeof request.sessionId === "string" ? request.sessionId : "";
+        const modelRef: ZcodeModelRef = {
+          providerId: DEFAULT_PROVIDER_ID,
+          modelId: officialModelId(model),
         };
+        if (!client || !requestSessionId) throw new Error("ZCode runtime header request had no active session");
+        const runtimeModel = createRuntimeModel(modelRef, captcha);
+        const updateResult = await client.call("session/updateRuntimeModelConfig", {
+          sessionId: requestSessionId,
+          runtimeModel,
+          applyModelSelection: true,
+        });
+        assertRuntimeModelApplied(updateResult, runtimeModel);
+        return { headersApplied: true };
       }
       return {};
     };
-    if (this.options.clientFactory) return this.options.clientFactory({ onRequest });
-    const command = this.options.command || process.env.ZCODE_SERVER_NODE || defaultCommand().command;
-    const args = this.options.args || (process.env.ZCODE_SERVER_NODE
-      ? [process.env.ZCODE_SERVER_ENTRY || join(process.env.ZCODE_SERVER_RUNTIME_ROOT || join(homedir(), ".zcode", "server"), "zcode-server.cjs")]
-      : defaultCommand().args);
-    return new ZcodeAppServerClient({
+    const options = { onRequest, onNotification };
+    if (this.options.clientFactory) {
+      client = this.options.clientFactory(options);
+      return client;
+    }
+    const command = this.options.command || defaultCommand().command;
+    const args = this.options.args || defaultCommand().args;
+    client = new ZcodeAppServerClient({
       command,
       args,
       cwd: this.options.cwd || process.env.ZCODE_CWD || process.cwd(),
       startupTimeoutMs: this.options.startupTimeoutMs ?? Number(process.env.ZCODE_STARTUP_TIMEOUT_MS || 10_000),
       requestTimeoutMs: this.options.requestTimeoutMs ?? Number(process.env.ZCODE_RPC_TIMEOUT_MS || 30_000),
       onRequest,
+      onNotification,
     });
+    return client;
   }
 
   private async runTurn(
@@ -370,92 +426,84 @@ export class ZcodeExecutor extends BaseExecutor {
     prompt: string,
     signal: AbortSignal | null | undefined,
     log: ExecuteInput["log"],
-    captchaRetryCount = 0
   ): Promise<string> {
-    let captcha: ZcodeCaptcha | undefined;
-    const acquireCaptcha = async (): Promise<ZcodeCaptcha | undefined> => {
-      captcha = await this.options.captchaSolver?.solve({
+    for (let captchaRetryCount = 0; captchaRetryCount <= MAX_CAPTCHA_RETRIES; captchaRetryCount += 1) {
+      const captcha = await this.options.captchaSolver?.solve({
         timeoutMs: this.options.captchaTimeoutMs ?? Number(process.env.ZCODE_CAPTCHA_TIMEOUT_MS || DEFAULT_CAPTCHA_TIMEOUT_MS),
       });
-      return captcha;
-    };
-    await acquireCaptcha();
-    const client = this.createClient(captcha);
-    const cwd = resolve(this.options.cwd || process.env.ZCODE_CWD || process.cwd());
-    const workspace = makeWorkspace(cwd);
-    const providerId = this.options.providerId || process.env.ZCODE_PROVIDER_ID || DEFAULT_PROVIDER_ID;
-    const turnTimeoutMs = this.options.turnTimeoutMs ?? Number(process.env.ZCODE_TURN_TIMEOUT_MS || DEFAULT_TURN_TIMEOUT_MS);
-    const pollIntervalMs = this.options.pollIntervalMs ?? Number(process.env.ZCODE_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
-    let sessionId: string | undefined;
+      if (!captcha) throw new Error("ZCode captcha solver returned no token");
 
-    try {
-      await raceAbort(client.start(), signal);
-      const initialized = asRecord(await raceAbort(client.call("zcode-agent", "initialize", [workspace]), signal));
-      if (initialized.available !== true) {
-        throw new Error(extractErrorMessage(initialized));
-      }
+      const waiter = createCompletionWaiter();
+      let assistantText = "";
+      let completionTimer: ReturnType<typeof setTimeout> | undefined;
+      const consumeNotification: ZcodeNotificationHandler = (method, params) => {
+        const root = asRecord(params);
+        if (method === "state.updated") {
+          const patch = asRecord(root.patch);
+          const candidate = extractAssistantText(patch);
+          if (candidate.length > assistantText.length) assistantText = candidate;
+          const status = patch.status ?? root.status;
+          if ((status === "completed" || status === "idle") && assistantText.trim()) waiter.resolve(assistantText);
+          if (status === "error" || status === "failed") waiter.reject(notificationError(patch));
+          return;
+        }
+        if (method !== "session/event") return;
+        const eventType = typeof root.type === "string" ? root.type : "";
+        const payload = asRecord(root.payload);
+        if (eventType === "part.delta" && typeof payload.delta === "string") assistantText += payload.delta;
+        if (eventType === "message.upserted" && typeof payload.content === "string") assistantText = payload.content;
+        if (eventType === "turn.completed") {
+          const response = typeof payload.response === "string" ? payload.response : assistantText;
+          if (response.trim()) waiter.resolve(response);
+        } else if (eventType === "turn.failed") {
+          waiter.reject(notificationError(payload));
+        }
+      };
+      const client = this.createClient(captcha, model, consumeNotification);
+      const cwd = this.options.cwd || process.env.ZCODE_CWD || process.cwd();
+      const workspace = makeWorkspace(cwd);
+      const providerId = DEFAULT_PROVIDER_ID;
+      let sessionId: string | undefined;
 
-      const created = await raceAbort(client.call("zcode-agent", "createSession", [{
-        ...workspace,
-        sessionTraceId: randomUUID(),
-        mode: "build",
-        persistence: "persistent",
-      }]), signal);
-      sessionId = extractSessionId(created);
-      if (!sessionId) throw new Error("ZCode createSession returned no sessionId");
-
-      await raceAbort(client.call("zcode-agent", "setModel", [{
-        ...workspace,
-        sessionId,
-        model: { providerId, modelId: model },
-      }]), signal);
-
-      let state: unknown;
       try {
-        state = await raceAbort(client.call("zcode-agent", "sendPrompt", [{
-          ...workspace,
-          sessionId,
-          inputId: randomUUID(),
-          content: prompt,
-        }]), signal);
+      await raceAbort(client.start(), signal);
+      await raceAbort(client.call("workspace/readState", { workspace }), signal);
+      const created = await raceAbort(client.call("session/create", {
+        workspace,
+        model: { providerId, modelId: officialModelId(model) },
+      }), signal);
+      sessionId = extractSessionId(created);
+      if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
+
+      const runtimeModel = createRuntimeModel({ providerId, modelId: officialModelId(model) }, captcha);
+      const updateResult = await raceAbort(client.call("session/updateRuntimeModelConfig", {
+        sessionId,
+        runtimeModel,
+        applyModelSelection: true,
+      }), signal);
+      assertRuntimeModelApplied(updateResult, runtimeModel);
+      await raceAbort(client.call("session/subscribe", {
+        sessionId,
+        deliveryKind: "desktop-continuous",
+      }), signal);
+      await raceAbort(client.call("session/send", { sessionId, content: prompt }), signal);
+
+      const turnTimeoutMs = this.options.turnTimeoutMs ?? Number(process.env.ZCODE_TURN_TIMEOUT_MS || DEFAULT_TURN_TIMEOUT_MS);
+      completionTimer = setTimeout(() => waiter.reject(new Error("ZCode turn timed out before an assistant response was available")), Math.max(1, turnTimeoutMs));
+      completionTimer.unref?.();
+      return await raceAbort(waiter.promise, signal);
       } catch (error) {
         if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
-        return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
-      }
-      const deadline = Date.now() + Math.max(1, turnTimeoutMs);
-
-      while (Date.now() <= deadline) {
-        if (signal?.aborted) throw abortError();
-        const text = extractAssistantText(state);
-        const status = extractStatus(state);
-        if (text && (status === undefined || TERMINAL_STATUSES.has(status))) return text;
-        if (status === "error") {
-          if (isCaptchaVerifyFailure(state) && captchaRetryCount < MAX_CAPTCHA_RETRIES) {
-            return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
-          }
-          throw new Error(extractErrorMessage(state));
+        continue;
+      } finally {
+        if (completionTimer) clearTimeout(completionTimer);
+        if (sessionId) {
+          await client.call("session/close", { sessionId }).catch(() => undefined);
         }
-        await delay(Math.max(0, pollIntervalMs), signal);
-        try {
-          state = await raceAbort(client.call("zcode-agent", "readSession", [{
-            ...workspace,
-            sessionId,
-            messageLimit: 200,
-          }]), signal);
-        } catch (error) {
-          if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
-          return this.runTurn(model, prompt, signal, log, captchaRetryCount + 1);
-        }
+        await client.close().catch((error) => log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`));
       }
-      const finalText = extractAssistantText(state);
-      if (finalText) return finalText;
-      throw new Error("ZCode turn timed out before an assistant response was available");
-    } finally {
-      if (sessionId && !signal?.aborted) {
-        await client.call("zcode-agent", "closeSession", [{ ...workspace, sessionId }]).catch(() => undefined);
-      }
-      await client.close().catch((error) => log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`));
     }
+    throw new Error("ZCode captcha retry exhausted");
   }
 
   // Credentials are intentionally ignored: the local ZCode profile owns auth.

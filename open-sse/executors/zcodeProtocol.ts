@@ -1,15 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-const HEADER_SIZE = 13;
-const REGULAR_MESSAGE = 1;
-const INITIALIZE_MESSAGE = 200;
-const RESPONSE_MESSAGE = 201;
-const ERROR_MESSAGE = 202;
-const CANCELED_MESSAGE = 203;
-const REQUEST_MESSAGE = 100;
-const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+const MAX_LINE_BYTES = 32 * 1024 * 1024;
+const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 type JsonRecord = Record<string, unknown>;
+export type ZcodeRpcId = string | number;
 
 export interface ZcodeAppServerClientOptions {
   command: string;
@@ -19,19 +15,22 @@ export interface ZcodeAppServerClientOptions {
   startupTimeoutMs?: number;
   requestTimeoutMs?: number;
   onRequest?: ZcodeIncomingRequestHandler;
+  onNotification?: ZcodeNotificationHandler;
 }
 
 export interface ZcodeClientLike {
   start(): Promise<void>;
-  call(channel: string, method: string, args: unknown[]): Promise<unknown>;
+  call(method: string, params?: unknown): Promise<unknown>;
   close(): Promise<void>;
 }
 
 export type ZcodeIncomingRequestHandler = (
-  channel: string,
   method: string,
-  args: unknown[]
+  params: unknown,
+  id: ZcodeRpcId
 ) => unknown | Promise<unknown>;
+
+export type ZcodeNotificationHandler = (method: string, params: unknown) => void;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -39,154 +38,61 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface DecodedValue {
-  value: unknown;
-  offset: number;
-}
-
-function encodeVql(value: number): Buffer {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`ZCode protocol requires a non-negative integer, got ${String(value)}`);
-  }
-  const bytes: number[] = [];
-  let remaining = value;
-  do {
-    let next = remaining % 128;
-    remaining = Math.floor(remaining / 128);
-    if (remaining > 0) next |= 0x80;
-    bytes.push(next);
-  } while (remaining > 0);
-  return Buffer.from(bytes);
-}
-
-function decodeVql(data: Uint8Array, offset: number): { value: number; offset: number } {
-  let value = 0;
-  let multiplier = 1;
-  let cursor = offset;
-  for (let i = 0; i < 8; i += 1) {
-    if (cursor >= data.byteLength) throw new Error("Truncated ZCode variable-length quantity");
-    const next = data[cursor++];
-    value += (next & 0x7f) * multiplier;
-    if ((next & 0x80) === 0) return { value, offset: cursor };
-    multiplier *= 128;
-  }
-  throw new Error("Invalid ZCode variable-length quantity");
-}
-
-/** Serialize one value using ZCode's SocketProtocol value encoding. */
-export function encodeZcodeValue(value: unknown): Buffer {
-  if (value === undefined) return Buffer.from([0]);
-  if (typeof value === "string") {
-    const bytes = Buffer.from(value, "utf8");
-    return Buffer.concat([Buffer.from([1]), encodeVql(bytes.byteLength), bytes]);
-  }
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    const bytes = Buffer.from(value);
-    return Buffer.concat([Buffer.from([2]), encodeVql(bytes.byteLength), bytes]);
-  }
-  if (Array.isArray(value)) {
-    return Buffer.concat([
-      Buffer.from([4]),
-      encodeVql(value.length),
-      ...value.map((item) => encodeZcodeValue(item)),
-    ]);
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
-    return Buffer.concat([Buffer.from([6]), encodeVql(value)]);
-  }
-  if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
-    throw new Error(`Unsupported ZCode protocol value type: ${typeof value}`);
-  }
-  const bytes = Buffer.from(JSON.stringify(value), "utf8");
-  return Buffer.concat([Buffer.from([5]), encodeVql(bytes.byteLength), bytes]);
-}
-
-/** Decode one value from ZCode's SocketProtocol value encoding. */
-export function decodeZcodeValue(data: Uint8Array, offset = 0): DecodedValue {
-  if (offset >= data.byteLength) throw new Error("Truncated ZCode serialized value");
-  const type = data[offset++];
-  if (type === 0) return { value: undefined, offset };
-  if (type === 1 || type === 2) {
-    const length = decodeVql(data, offset);
-    const end = length.offset + length.value;
-    if (end > data.byteLength) throw new Error("Truncated ZCode byte/string value");
-    const bytes = data.slice(length.offset, end);
-    return {
-      value: type === 1 ? Buffer.from(bytes).toString("utf8") : Buffer.from(bytes),
-      offset: end,
-    };
-  }
-  if (type === 4) {
-    const length = decodeVql(data, offset);
-    const values: unknown[] = [];
-    let cursor = length.offset;
-    for (let i = 0; i < length.value; i += 1) {
-      const decoded = decodeZcodeValue(data, cursor);
-      values.push(decoded.value);
-      cursor = decoded.offset;
-    }
-    return { value: values, offset: cursor };
-  }
-  if (type === 5) {
-    const length = decodeVql(data, offset);
-    const end = length.offset + length.value;
-    if (end > data.byteLength) throw new Error("Truncated ZCode JSON value");
-    return {
-      value: JSON.parse(Buffer.from(data.slice(length.offset, end)).toString("utf8")),
-      offset: end,
-    };
-  }
-  if (type === 6) {
-    const decoded = decodeVql(data, offset);
-    return { value: decoded.value, offset: decoded.offset };
-  }
-  throw new Error(`Unknown ZCode serialized value type ${type}`);
-}
-
-function encodeZcodeRpcFrame(header: unknown, payload: unknown): Buffer {
-  const body = Buffer.concat([encodeZcodeValue(header), encodeZcodeValue(payload)]);
-  const frame = Buffer.alloc(HEADER_SIZE + body.byteLength);
-  frame.writeUInt8(REGULAR_MESSAGE, 0);
-  frame.writeUInt32BE(0, 1);
-  frame.writeUInt32BE(0, 5);
-  frame.writeUInt32BE(body.byteLength, 9);
-  body.copy(frame, HEADER_SIZE);
-  return frame;
-}
-
-export function encodeZcodeRpcCall(
-  id: number,
-  channel: string,
-  method: string,
-  args: unknown[]
-): Buffer {
-  return encodeZcodeRpcFrame([REQUEST_MESSAGE, id, channel, method], args);
-}
-
-function encodeZcodeRpcResponse(id: number, payload: unknown): Buffer {
-  return encodeZcodeRpcFrame([RESPONSE_MESSAGE, id], payload);
-}
-
-function encodeZcodeRpcError(id: number, error: unknown): Buffer {
-  const message = error instanceof Error ? error.message : String(error);
-  return encodeZcodeRpcFrame([ERROR_MESSAGE, id], { message });
+function idKey(id: ZcodeRpcId): string {
+  return `${typeof id}:${String(id)}`;
 }
 
 function errorFromPayload(payload: unknown, fallback: string): Error {
-  if (payload && typeof payload === "object") {
-    const record = payload as JsonRecord;
-    const message = typeof record.message === "string" ? record.message : fallback;
-    const error = new Error(message);
-    if (typeof record.code === "string" || typeof record.code === "number") Object.assign(error, { code: record.code });
-    if (record.data !== undefined) Object.assign(error, { data: record.data });
-    return error;
+  const record = payload && typeof payload === "object" ? payload as JsonRecord : {};
+  const message = typeof record.message === "string" ? record.message : fallback;
+  const error = new Error(message);
+  const visited = new Set<object>();
+  const findCode = (value: unknown, depth: number): number | string | undefined => {
+    if (!value || typeof value !== "object" || depth > 8) return undefined;
+    if (visited.has(value)) return undefined;
+    visited.add(value);
+    const nested = value as JsonRecord;
+    const directCodes = [nested.code, nested.providerCode];
+    for (const code of directCodes) {
+      if (code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED") return code;
+    }
+    let firstCode: number | string | undefined;
+    for (const code of directCodes) {
+      if (firstCode === undefined && (typeof code === "number" || typeof code === "string")) {
+        firstCode = code;
+      }
+    }
+    for (const child of Object.values(nested)) {
+      const code = findCode(child, depth + 1);
+      if (code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED") return code;
+      if (firstCode === undefined && code !== undefined) firstCode = code;
+    }
+    for (const code of directCodes) {
+      if (typeof code === "number" || typeof code === "string") return code;
+    }
+    return firstCode;
+  };
+  const outerCode = typeof record.code === "number" || typeof record.code === "string" ? record.code : undefined;
+  const nestedCodes = ["error", "data", "context", "payload", "details", "cause"]
+    .map((key) => findCode(record[key], 0))
+    .filter((candidate): candidate is number | string => candidate !== undefined);
+  const nestedCode = nestedCodes.find((candidate) =>
+    candidate === 3007 || candidate === "3007" || candidate === "CAPTCHA_VERIFY_FAILED"
+  ) ?? nestedCodes[0];
+  if (outerCode !== undefined) Object.assign(error, { code: outerCode });
+  if (nestedCode !== undefined && nestedCode !== outerCode) Object.assign(error, { providerCode: nestedCode });
+  for (const key of ["data", "context"]) {
+    if (record[key] !== undefined) Object.assign(error, { [key]: record[key] });
   }
-  return new Error(fallback);
+  return error;
 }
 
 /**
- * Local stdio client for the ZCode app-server. The protocol starts with a JSON
- * hello line and then switches to 13-byte length-prefixed binary frames.
+ * Local stdio client for the official ZCode app-server protocol.
+ *
+ * ZCode speaks newline-delimited JSON. Requests and responses are JSON
+ * objects keyed by id; notifications and server-initiated requests are also
+ * JSON objects and never carry a JSON-RPC `jsonrpc` field.
  */
 export class ZcodeAppServerClient implements ZcodeClientLike {
   private readonly command: string;
@@ -196,24 +102,25 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
   private readonly startupTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly onRequest?: ZcodeIncomingRequestHandler;
+  private readonly onNotification?: ZcodeNotificationHandler;
   private child?: ChildProcessWithoutNullStreams;
-  private pendingChunks: Buffer[] = [];
-  private handshakeDone = false;
+  private stdoutBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private ready = false;
   private startPromise?: Promise<void>;
   private serverReady?: () => void;
   private serverReadyError?: (error: Error) => void;
   private nextRequestId = 1;
-  private readonly pending = new Map<number, PendingRequest>();
+  private readonly pending = new Map<string, PendingRequest>();
 
   constructor(options: ZcodeAppServerClientOptions) {
     this.command = options.command;
     this.args = options.args ?? [];
     this.cwd = options.cwd;
     this.env = options.env;
-    this.startupTimeoutMs = options.startupTimeoutMs ?? 10_000;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.onRequest = options.onRequest;
+    this.onNotification = options.onNotification;
   }
 
   async start(): Promise<void> {
@@ -240,8 +147,7 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     }
 
     this.child = child;
-    this.pendingChunks = [];
-    this.handshakeDone = false;
+    this.stdoutBuffer = Buffer.alloc(0);
     this.ready = false;
     child.stdin.on("error", () => {
       // EPIPE is expected when timeout/abort closes an already-exited runtime.
@@ -263,9 +169,9 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
 
     child.stdout.on("data", (chunk: Buffer) => this.onStdout(chunk));
     child.stderr.on("data", () => {
-      // ZCode stderr is intentionally not forwarded: it can contain provider
-      // diagnostics or credentials from the user's local runtime.
+      // Runtime diagnostics can contain provider credentials; never forward them.
     });
+    child.once("spawn", () => this.serverReady?.());
     child.on("error", (error) => {
       this.serverReadyError?.(error);
       this.rejectPending(error);
@@ -273,14 +179,13 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     child.on("exit", (code, signal) => {
       const error = new Error(`ZCode app-server exited: ${code ?? signal ?? "unknown"}`);
       this.ready = false;
-      this.handshakeDone = false;
       this.serverReadyError?.(error);
       this.rejectPending(error);
       if (this.child === child) this.child = undefined;
     });
 
     try {
-      await this.withTimeout(readyPromise, this.startupTimeoutMs, "ZCode app-server handshake timed out");
+      await this.withTimeout(readyPromise, this.startupTimeoutMs, "ZCode app-server startup timed out");
       this.ready = true;
     } catch (error) {
       await this.disposeChild(child);
@@ -291,151 +196,119 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     }
   }
 
-  // Buffer accumulated stdout bytes. Chunks are collected in an array and
-  // collapsed into one contiguous buffer only when a complete frame (or the
-  // hello line) might be present — the previous `concat(prev, chunk)` per data
-  // event re-allocated the whole buffer on every chunk, i.e. O(n²) total.
   private onStdout(chunk: Buffer): void {
-    this.pendingChunks.push(chunk);
-    let total = 0;
-    for (const part of this.pendingChunks) total += part.byteLength;
-    const buffer = total === chunk.byteLength && this.pendingChunks.length > 0
-      ? chunk
-      : Buffer.concat(this.pendingChunks);
-    this.pendingChunks = [buffer];
+    this.stdoutBuffer = this.stdoutBuffer.byteLength === 0
+      ? Buffer.from(chunk)
+      : Buffer.concat([this.stdoutBuffer, chunk]);
 
-    if (!this.handshakeDone) {
-      const newline = buffer.indexOf(0x0a);
+    while (true) {
+      const newline = this.stdoutBuffer.indexOf(0x0a);
       if (newline < 0) {
-        if (buffer.byteLength > 64 * 1024) {
-          this.serverReadyError?.(new Error("ZCode hello line is too large"));
+        if (this.stdoutBuffer.byteLength > MAX_LINE_BYTES) {
+          const error = new Error("ZCode NDJSON message exceeds the configured safety limit");
+          this.rejectPending(error);
+          this.serverReadyError?.(error);
         }
         return;
       }
-      const line = buffer.subarray(0, newline).toString("utf8").trim();
-      this.pendingChunks = [buffer.subarray(newline + 1)];
-      let hello: unknown;
-      try {
-        hello = JSON.parse(line);
-      } catch {
-        this.serverReadyError?.(new Error("Invalid ZCode app-server hello"));
-        return;
-      }
-      if (!hello || typeof hello !== "object" || (hello as JsonRecord).type !== "zcode-hello") {
-        this.serverReadyError?.(new Error("Unexpected ZCode app-server hello"));
-        return;
-      }
-      const child = this.child;
-      if (!child) return;
-      child.stdin.write(`${JSON.stringify({
-        type: "zcode-hello-ack",
-        version: "omniroute",
-        clientId: `omniroute-${process.pid}`,
-      })}\n`);
-      this.handshakeDone = true;
-    }
-    this.consumeFrames();
-  }
-
-  private consumeFrames(): void {
-    // Collapse to one buffer for frame scanning (only happens once per data
-    // event since onStdout already deduped), then drop consumed frames.
-    const buffer = this.pendingChunks[0];
-    let offset = 0;
-    while (buffer.byteLength - offset >= HEADER_SIZE) {
-      const type = buffer.readUInt8(offset);
-      const length = buffer.readUInt32BE(offset + 9);
-      if (length > MAX_FRAME_BYTES) {
-        const error = new Error("ZCode frame exceeds the configured safety limit");
-        this.serverReadyError?.(error);
+      const line = this.stdoutBuffer.subarray(0, newline);
+      this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
+      if (line.byteLength > MAX_LINE_BYTES) {
+        const error = new Error("ZCode NDJSON message exceeds the configured safety limit");
         this.rejectPending(error);
+        this.serverReadyError?.(error);
+        continue;
+      }
+      const text = line.toString("utf8").trim();
+      if (!text) continue;
+      let message: unknown;
+      try {
+        message = JSON.parse(text);
+      } catch {
+        const error = new Error("Invalid ZCode NDJSON message");
+        this.rejectPending(error);
+        this.serverReadyError?.(error);
+        continue;
+      }
+      this.handleMessage(message);
+    }
+  }
+
+  private handleMessage(value: unknown): void {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const message = value as JsonRecord;
+    const hasId = Object.prototype.hasOwnProperty.call(message, "id");
+    const id = message.id;
+    if (hasId && (typeof id === "string" || typeof id === "number")) {
+      if (typeof message.method === "string") {
+        this.handleServerRequest(id, message.method, message.params);
         return;
       }
-      const frameLength = HEADER_SIZE + length;
-      if (buffer.byteLength - offset < frameLength) break;
-      const body = buffer.subarray(offset + HEADER_SIZE, offset + frameLength);
-      offset += frameLength;
-      if (type !== REGULAR_MESSAGE) continue;
+      const request = this.pending.get(idKey(id));
+      if (!request) return;
+      this.pending.delete(idKey(id));
+      clearTimeout(request.timer);
+      if (Object.prototype.hasOwnProperty.call(message, "error")) {
+        request.reject(errorFromPayload(message.error, "ZCode app-server request failed"));
+      } else {
+        request.resolve(message.result);
+      }
+      return;
+    }
+    if (typeof message.method === "string") {
       try {
-        const header = decodeZcodeValue(body, 0);
-        const payload = decodeZcodeValue(body, header.offset);
-        this.handleMessage(header.value, payload.value);
-      } catch (error) {
-        const normalized = error instanceof Error ? error : new Error(String(error));
-        this.serverReadyError?.(normalized);
-        this.rejectPending(normalized);
+        this.onNotification?.(message.method, message.params);
+      } catch {
+        // A consumer notification callback must not tear down the transport.
       }
     }
-    if (offset > 0) this.pendingChunks = [buffer.subarray(offset)];
   }
 
-  private handleMessage(headerValue: unknown, payload: unknown): void {
-    if (!Array.isArray(headerValue)) return;
-    const type = headerValue[0];
-    if (type === INITIALIZE_MESSAGE) {
-      this.serverReady?.();
-      return;
-    }
-    if (type === REQUEST_MESSAGE) {
-      const requestId = headerValue[1];
-      const channel = headerValue[2];
-      const method = headerValue[3];
-      if (typeof requestId !== "number" || typeof channel !== "string" || typeof method !== "string") return;
-      const child = this.child;
-      if (!child || !this.onRequest) return;
-      Promise.resolve(this.onRequest(channel, method, Array.isArray(payload) ? payload : []))
-        .then((result) => {
-          if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
-          try {
-            child.stdin.write(encodeZcodeRpcResponse(requestId, result));
-          } catch (error) {
-            this.serverReadyError?.(error instanceof Error ? error : new Error(String(error)));
-          }
-        })
-        .catch((error) => {
-          if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
-          try {
-            child.stdin.write(encodeZcodeRpcError(requestId, error));
-          } catch (writeError) {
-            this.serverReadyError?.(writeError instanceof Error ? writeError : new Error(String(writeError)));
-          }
+  private handleServerRequest(id: ZcodeRpcId, method: string, params: unknown): void {
+    const child = this.child;
+    if (!child) return;
+    Promise.resolve(this.onRequest?.(method, params, id) ?? {})
+      .then((result) => {
+        if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+        this.writeMessage({ id, result: result === undefined ? null : result });
+      })
+      .catch((error) => {
+        if (this.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+        const record = error && typeof error === "object" ? error as JsonRecord : {};
+        this.writeMessage({
+          id,
+          error: {
+            code: typeof record.code === "number" ? record.code : -32000,
+            message: error instanceof Error ? error.message : String(error),
+          },
         });
-      return;
-    }
-    if (type !== RESPONSE_MESSAGE && type !== ERROR_MESSAGE && type !== CANCELED_MESSAGE) return;
-    const requestId = headerValue[1];
-    if (typeof requestId !== "number") return;
-    const request = this.pending.get(requestId);
-    if (!request) return;
-    this.pending.delete(requestId);
-    clearTimeout(request.timer);
-    if (type === RESPONSE_MESSAGE) {
-      request.resolve(payload);
-    } else {
-      request.reject(errorFromPayload(
-        payload,
-        type === ERROR_MESSAGE ? "ZCode RPC request failed" : "ZCode RPC request canceled"
-      ));
-    }
+      });
   }
 
-  async call(channel: string, method: string, args: unknown[]): Promise<unknown> {
+  private writeMessage(message: JsonRecord): void {
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  async call(method: string, params: unknown = {}): Promise<unknown> {
     await this.start();
     const child = this.child;
     if (!child || !this.ready) throw new Error("ZCode app-server is not ready");
     const requestId = this.nextRequestId++;
+    const key = idKey(requestId);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new Error(`ZCode RPC request timed out: ${channel}.${method}`));
+        this.pending.delete(key);
+        reject(new Error(`ZCode app-server request timed out: ${method}`));
       }, this.requestTimeoutMs);
       timer.unref?.();
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(key, { resolve, reject, timer });
       try {
-        child.stdin.write(encodeZcodeRpcCall(requestId, channel, method, args));
+        this.writeMessage({ id: requestId, method, params });
       } catch (error) {
         clearTimeout(timer);
-        this.pending.delete(requestId);
+        this.pending.delete(key);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -444,7 +317,6 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
   async close(): Promise<void> {
     const child = this.child;
     this.ready = false;
-    this.handshakeDone = false;
     this.child = undefined;
     this.serverReadyError?.(new Error("ZCode app-server closed"));
     this.rejectPending(new Error("ZCode app-server closed"));
@@ -452,16 +324,20 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
   }
 
   private rejectPending(error: Error): void {
-    for (const [id, pending] of this.pending) {
+    for (const [key, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(error);
-      this.pending.delete(id);
+      this.pending.delete(key);
     }
   }
 
   private async disposeChild(child: ChildProcessWithoutNullStreams): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    let resolveClosed: (() => void) | undefined;
+    const exited = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+      child.once("close", resolve);
+    });
     try {
       child.stdin.end();
     } catch {
@@ -479,8 +355,9 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     if (timer) clearTimeout(timer);
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");
-      await exited;
+      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 500))]);
     }
+    resolveClosed?.();
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
