@@ -57,6 +57,18 @@ type RuntimeUpdateResult = {
   changed?: unknown;
   runtimeApplied?: unknown;
 };
+type ZcodeSessionCacheEntry = {
+  client: ZcodeClientLike;
+  sessionId: string;
+  lastSeen: number;
+  sentMessageCount: number;
+  sentPromptHash: string;
+  messages: OpenAIMsg[];
+  model: string;
+  notify?: ZcodeNotificationHandler;
+};
+
+const ZCODE_SESSION_TTL_MS = 10 * 60 * 1000;
 
 export type ZcodeClientFactoryOptions = {
   onRequest: ZcodeIncomingRequestHandler;
@@ -81,6 +93,26 @@ function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
+function messageEqual(left: OpenAIMsg, right: OpenAIMsg): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isMessagePrefix(previous: OpenAIMsg[], current: OpenAIMsg[]): boolean {
+  return (
+    previous.length <= current.length &&
+    previous.every((message, index) => messageEqual(message, current[index]))
+  );
+}
+
+function hashPrompt(prompt: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < prompt.length; index += 1) {
+    hash ^= prompt.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -99,12 +131,24 @@ function textFromContent(content: unknown): string {
 /** Convert an OpenAI conversation into one explicit ZCode coding turn. */
 export function buildZcodePrompt(messages: OpenAIMsg[]): string {
   const parts: string[] = [];
-  for (const message of messages) {
+  const userTurnStarts = messages.reduce<number[]>((starts, message, index) => {
+    if (String(message.role || "user") === "user") starts.push(index);
+    return starts;
+  }, []);
+  const protectedTurnStart = userTurnStarts[Math.max(0, userTurnStarts.length - 2)] ?? 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
     const text = textFromContent(message.content).trim();
     if (!text) continue;
     const role = String(message.role || "user");
+    const shouldPreserve = role === "system" || index >= protectedTurnStart;
+    const renderedText =
+      shouldPreserve || (role !== "tool" && text.length <= 1_500)
+        ? text
+        : `${text.slice(0, 500)}\n... [truncated ${text.length - 800} chars of previous tool output] ...\n${text.slice(-300)}`;
     const label = role === "system" ? "System" : role === "assistant" ? "Assistant" : "User";
-    parts.push(`[${label}]\n${text}`);
+    parts.push(`[${label}]\n${renderedText}`);
   }
   return parts.join("\n\n") || "(empty)";
 }
@@ -463,6 +507,7 @@ export function notificationError(params: unknown): Error {
 
 export class ZcodeExecutor extends BaseExecutor {
   private readonly options: ZcodeExecutorOptions;
+  private readonly sessionCache = new Map<string, ZcodeSessionCacheEntry>();
 
   constructor(options: ZcodeExecutorOptions = {}) {
     super("zcode", { id: "zcode", baseUrl: ZCODE_URL, format: "openai" });
@@ -489,11 +534,22 @@ export class ZcodeExecutor extends BaseExecutor {
 
     const body = asRecord(input.body);
     const messages = Array.isArray(body.messages) ? (body.messages as OpenAIMsg[]) : [];
+    const conversationId =
+      (typeof body.conversation_id === "string" && body.conversation_id) ||
+      (typeof body.chat_id === "string" && body.chat_id) ||
+      hashPrompt(JSON.stringify(messages));
     const prompt = buildZcodePrompt(messages);
     input.log?.info?.("ZCODE", `local app-server turn started model=${resolution.model}`);
 
     try {
-      const turnResult = await this.runTurn(resolution.model, prompt, input.signal, input.log);
+      const turnResult = await this.runTurn(
+        resolution.model,
+        prompt,
+        messages,
+        conversationId,
+        input.signal,
+        input.log
+      );
       const response = input.stream
         ? sseResponse(resolution.model, turnResult.content, prompt, turnResult.usage)
         : completionResponse(resolution.model, prompt, turnResult.content, turnResult.usage);
@@ -572,6 +628,8 @@ export class ZcodeExecutor extends BaseExecutor {
   private async runTurn(
     model: string,
     prompt: string,
+    messages: OpenAIMsg[],
+    conversationId: string,
     signal: AbortSignal | null | undefined,
     log: ExecuteInput["log"]
   ): Promise<ZcodeTurnResult> {
@@ -645,25 +703,51 @@ export class ZcodeExecutor extends BaseExecutor {
         }
       };
       const apiKey = loadZcodeApiKey();
-      const client = this.createClient(captcha, model, consumeNotification);
+      const cached = this.sessionCache.get(conversationId);
+      if (
+        cached &&
+        (Date.now() - cached.lastSeen > ZCODE_SESSION_TTL_MS || cached.model !== model)
+      ) {
+        await cached.client
+          .call("session/close", { sessionId: cached.sessionId })
+          .catch(() => undefined);
+        await cached.client.close().catch(() => undefined);
+        this.sessionCache.delete(conversationId);
+      }
+      const reusable = this.sessionCache.get(conversationId);
+      const notificationRouter: ZcodeNotificationHandler = (method, params) => {
+        const active = this.sessionCache.get(conversationId);
+        (active?.notify || consumeNotification)(method, params);
+      };
+      const client = reusable?.client || this.createClient(captcha, model, notificationRouter);
+      if (reusable) reusable.notify = consumeNotification;
       const cwd = this.options.cwd || process.env.ZCODE_CWD || process.cwd();
       const workspace = makeWorkspace(cwd);
       const providerId = DEFAULT_PROVIDER_ID;
-      let sessionId: string | undefined;
+      let sessionId: string | undefined = reusable?.sessionId;
+      const isReusable = Boolean(reusable);
 
       try {
         await raceAbort(client.start(), signal);
         await raceAbort(client.call("workspace/readState", { workspace }), signal);
-        const created = await raceAbort(
-          client.call("session/create", {
-            workspace,
-            model: { providerId, modelId: officialModelId(model) },
-          }),
-          signal
-        );
-        sessionId = extractSessionId(created);
-        if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
+        if (!isReusable) {
+          const created = await raceAbort(
+            client.call("session/create", {
+              workspace,
+              model: { providerId, modelId: officialModelId(model) },
+            }),
+            signal
+          );
+          sessionId = extractSessionId(created);
+          if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
+        }
 
+        if (!sessionId) throw new Error("ZCode session has no sessionId");
+        const previousMessages = reusable?.messages || [];
+        const deltaMessages = isMessagePrefix(previousMessages, messages)
+          ? messages.slice(previousMessages.length)
+          : messages;
+        const sendPrompt = buildZcodePrompt(deltaMessages);
         const runtimeModel = createRuntimeModel(
           { providerId, modelId: officialModelId(model) },
           captcha,
@@ -685,7 +769,17 @@ export class ZcodeExecutor extends BaseExecutor {
           }),
           signal
         );
-        await raceAbort(client.call("session/send", { sessionId, content: prompt }), signal);
+        await raceAbort(client.call("session/send", { sessionId, content: sendPrompt }), signal);
+        this.sessionCache.set(conversationId, {
+          client,
+          sessionId,
+          lastSeen: Date.now(),
+          sentMessageCount: messages.length,
+          sentPromptHash: hashPrompt(prompt),
+          messages: [...messages],
+          model,
+          notify: consumeNotification,
+        });
 
         const turnTimeoutMs =
           this.options.turnTimeoutMs ??
@@ -700,18 +794,24 @@ export class ZcodeExecutor extends BaseExecutor {
         completionTimer.unref?.();
         return await raceAbort(waiter.promise, signal);
       } catch (error) {
+        const cachedEntry = this.sessionCache.get(conversationId);
+        if (cachedEntry?.client === client) {
+          this.sessionCache.delete(conversationId);
+          await client.call("session/close", { sessionId }).catch(() => undefined);
+          await client.close().catch(() => undefined);
+        }
         if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
         continue;
       } finally {
         if (completionTimer) clearTimeout(completionTimer);
-        if (sessionId) {
+        if (!isReusable && sessionId && !this.sessionCache.has(conversationId)) {
           await client.call("session/close", { sessionId }).catch(() => undefined);
+          await client
+            .close()
+            .catch((error) =>
+              log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`)
+            );
         }
-        await client
-          .close()
-          .catch((error) =>
-            log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`)
-          );
       }
     }
     throw new Error("ZCode captcha retry exhausted");

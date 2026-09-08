@@ -19,6 +19,39 @@ async function loadZcodeExecutor() {
   return import("../../open-sse/executors/zcode.ts");
 }
 
+test("preserves oversized tool output from the most recent two turns", async () => {
+  const { buildZcodePrompt } = await loadZcodeExecutor();
+  const recentToolOutput = "recent-tool-output-" + "x".repeat(1_500);
+  const prompt = buildZcodePrompt([
+    { role: "user", content: "turn one" },
+    { role: "tool", content: "old-tool-output" },
+    { role: "user", content: "turn two" },
+    { role: "tool", content: recentToolOutput },
+    { role: "user", content: "turn three" },
+  ]);
+
+  assert.match(prompt, new RegExp(recentToolOutput));
+  assert.doesNotMatch(prompt, /truncated \\d+ chars of previous tool output/);
+});
+
+test("truncates oversized tool output older than the most recent two turns", async () => {
+  const { buildZcodePrompt } = await loadZcodeExecutor();
+  const oldToolOutput = "old-tool-output-" + "x".repeat(1_500);
+  const prompt = buildZcodePrompt([
+    { role: "user", content: "turn one" },
+    { role: "tool", content: oldToolOutput },
+    { role: "user", content: "turn two" },
+    { role: "assistant", content: "answer two" },
+    { role: "user", content: "turn three" },
+    { role: "assistant", content: "answer three" },
+  ]);
+
+  assert.match(prompt, /\.\.\. \[truncated 716 chars of previous tool output\] \.\.\./);
+  assert.ok(!prompt.includes(oldToolOutput));
+  assert.ok(prompt.includes(oldToolOutput.slice(0, 500)));
+  assert.ok(prompt.includes(oldToolOutput.slice(-300)));
+});
+
 type CaptchaResult = { verifyParam: string; region: string };
 type CaptchaSolver = { solve: (options?: { timeoutMs?: number }) => Promise<CaptchaResult> };
 type FakeBehavior = { failFirstSend?: boolean; onClose?: () => void | Promise<void> };
@@ -457,6 +490,71 @@ test("ZCode buffers the completed turn into OpenAI SSE when stream=true", async 
   assert.equal(response.status, 200);
   assert.match(text, /fake zcode response/);
   assert.match(text, /data: \[DONE\]/);
+});
+
+test("ZCode reuses a conversation session and sends only appended messages", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const executor = new ZcodeExecutor({
+    captchaSolver: defaultCaptchaSolver,
+    clientFactory: (options = { onRequest: async () => ({}) }) => ({
+      start: async () => undefined,
+      call: async (method: string, params: unknown = {}) => {
+        calls.push({ method, params });
+        if (method === "workspace/readState") return { modelCatalog: { providers: [] } };
+        if (method === "session/create") return { session: { sessionId: "keep-alive-session" } };
+        if (method === "session/updateRuntimeModelConfig") {
+          const revision = (params as { runtimeModel?: { revision?: string } }).runtimeModel
+            ?.revision;
+          return { appliedModelRuntimeRevision: revision, runtimeApplied: true };
+        }
+        if (method === "session/subscribe") return { sessionId: "keep-alive-session" };
+        if (method === "session/send") {
+          queueMicrotask(() =>
+            options.onNotification?.("session/event", {
+              type: "turn.completed",
+              payload: { response: "kept alive" },
+            })
+          );
+          return { accepted: true };
+        }
+        return {};
+      },
+      close: async () => undefined,
+    }),
+  });
+  const firstMessages = requestBody().messages;
+  const secondMessages = [
+    ...firstMessages,
+    { role: "assistant", content: "Earlier answer" },
+    { role: "user", content: "Now continue." },
+  ];
+
+  const first = await executor.execute({
+    model: "glm-5.2",
+    body: { conversation_id: "conversation-keep-alive", messages: firstMessages },
+    stream: false,
+    credentials: {},
+  });
+  assert.equal(("response" in first ? first.response : first).status, 200);
+
+  const second = await executor.execute({
+    model: "glm-5.2",
+    body: { conversation_id: "conversation-keep-alive", messages: secondMessages },
+    stream: false,
+    credentials: {},
+  });
+  assert.equal(("response" in second ? second.response : second).status, 200);
+
+  assert.equal(calls.filter(({ method }) => method === "session/create").length, 1);
+  const sends = calls.filter(({ method }) => method === "session/send");
+  assert.equal(sends.length, 2);
+  const firstContent = (sends[0]?.params as { content?: string }).content;
+  const secondContent = (sends[1]?.params as { content?: string }).content;
+  assert.match(firstContent || "", /Reply with a short status/);
+  assert.match(secondContent || "", /Now continue/);
+  assert.doesNotMatch(secondContent || "", /You are a coding assistant/);
+  assert.match(secondContent || "", /Earlier answer/);
 });
 
 test("ZCode accurately extracts and reports usage from turn.completed in both non-stream and stream modes", async () => {
