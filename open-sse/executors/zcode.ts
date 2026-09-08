@@ -641,6 +641,14 @@ export class ZcodeExecutor extends BaseExecutor {
         if (directResult && !shouldFallbackToStdio(directResult)) {
           return directResult;
         }
+        if (input.signal?.aborted) {
+          return (
+            directResult ||
+            (input.stream
+              ? sseErrorResponse(499, "Request aborted")
+              : errorResponse(499, "Request aborted"))
+          );
+        }
         input.log?.warn?.("ZCODE", "Direct API unavailable; falling back to local app-server");
       }
     }

@@ -793,3 +793,40 @@ test("ZCode falls back to the legacy app-server after direct infrastructure fail
   assert.equal(response.status, 200);
   assert.equal((await response.json()).choices[0].message.content, "fake zcode response");
 });
+
+test("ZCode does not fall back to stdio when direct execution is aborted", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  let directExecuted = false;
+  let stdioCalled = false;
+  const controller = new AbortController();
+  controller.abort();
+
+  const executor = new ZcodeExecutor({
+    clientFactory: () => {
+      stdioCalled = true;
+      throw new Error("stdio client must not be created on aborted request");
+    },
+    directExecutorFactory: () => {
+      return {
+        execute: async () => {
+          directExecuted = true;
+          return new Response(JSON.stringify({ error: "aborted" }), { status: 502 });
+        },
+      } as never;
+    },
+    captchaSolver: defaultCaptchaSolver,
+  });
+
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+    signal: controller.signal,
+  });
+
+  assert.equal(directExecuted, true);
+  assert.equal(stdioCalled, false);
+  const response = "response" in result ? result.response : result;
+  assert.equal(response.status, 502);
+});
