@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
 import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult, type ProviderCredentials } from "./base.ts";
@@ -271,7 +274,22 @@ function assertRuntimeModelApplied(value: unknown, runtimeModel: JsonRecord): vo
   }
 }
 
-function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha): JsonRecord {
+function loadZcodeApiKey(): string | undefined {
+  if (process.env.ZCODE_API_KEY) return process.env.ZCODE_API_KEY;
+  try {
+    const configPath = process.env.ZCODE_CONFIG_PATH || path.join(os.homedir(), ".zcode", "cli", "config.json");
+    if (fs.existsSync(configPath)) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      const key = parsed?.provider?.[DEFAULT_PROVIDER_ID]?.options?.apiKey;
+      if (typeof key === "string" && key.trim()) return key.trim();
+    }
+  } catch {
+    // Ignore config read error
+  }
+  return undefined;
+}
+
+function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha, apiKey?: string): JsonRecord {
   const generatedAt = Date.now();
   return {
     revision: `omniroute-${generatedAt}-${randomUUID()}`,
@@ -283,6 +301,8 @@ function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha): Jso
       apiFormat: "anthropic-messages",
       source: "builtin",
       baseURL: ZCODE_ANTHROPIC_BASE_URL,
+      apiKey: apiKey ? { source: "inline", value: apiKey } : undefined,
+      apiKeyRequired: true,
       headers: {
         [CAPTCHA_VERIFY_PARAM_HEADER]: captcha.verifyParam,
         [CAPTCHA_VERIFY_REGION_HEADER]: captcha.region,
@@ -379,6 +399,7 @@ export class ZcodeExecutor extends BaseExecutor {
     onNotification: ZcodeNotificationHandler,
   ): ZcodeClientLike {
     let client: ZcodeClientLike | undefined;
+    const apiKey = loadZcodeApiKey();
     const onRequest: ZcodeIncomingRequestHandler = async (method, params) => {
       if (method === "session/requestRuntimePreferences") {
         return { nativeSearchEnhancementsEnabled: false };
@@ -391,7 +412,7 @@ export class ZcodeExecutor extends BaseExecutor {
           modelId: officialModelId(model),
         };
         if (!client || !requestSessionId) throw new Error("ZCode runtime header request had no active session");
-        const runtimeModel = createRuntimeModel(modelRef, captcha);
+        const runtimeModel = createRuntimeModel(modelRef, captcha, apiKey);
         const updateResult = await client.call("session/updateRuntimeModelConfig", {
           sessionId: requestSessionId,
           runtimeModel,
@@ -450,7 +471,9 @@ export class ZcodeExecutor extends BaseExecutor {
         if (method !== "session/event") return;
         const eventType = typeof root.type === "string" ? root.type : "";
         const payload = asRecord(root.payload);
-        if (eventType === "part.delta" && typeof payload.delta === "string") assistantText += payload.delta;
+        if ((eventType === "part.delta" || eventType === "model.streaming") && typeof payload.delta === "string") {
+          assistantText += payload.delta;
+        }
         if (eventType === "message.upserted" && typeof payload.content === "string") assistantText = payload.content;
         if (eventType === "turn.completed") {
           const response = typeof payload.response === "string" ? payload.response : assistantText;
@@ -459,6 +482,7 @@ export class ZcodeExecutor extends BaseExecutor {
           waiter.reject(notificationError(payload));
         }
       };
+      const apiKey = loadZcodeApiKey();
       const client = this.createClient(captcha, model, consumeNotification);
       const cwd = this.options.cwd || process.env.ZCODE_CWD || process.cwd();
       const workspace = makeWorkspace(cwd);
@@ -475,7 +499,7 @@ export class ZcodeExecutor extends BaseExecutor {
       sessionId = extractSessionId(created);
       if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
 
-      const runtimeModel = createRuntimeModel({ providerId, modelId: officialModelId(model) }, captcha);
+      const runtimeModel = createRuntimeModel({ providerId, modelId: officialModelId(model) }, captcha, apiKey);
       const updateResult = await raceAbort(client.call("session/updateRuntimeModelConfig", {
         sessionId,
         runtimeModel,

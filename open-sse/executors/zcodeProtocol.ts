@@ -137,7 +137,11 @@ export class ZcodeAppServerClient implements ZcodeClientLike {
     try {
       child = spawn(this.command, this.args, {
         cwd: this.cwd,
-        env: this.env ? { ...process.env, ...this.env } : process.env,
+        env: {
+          ...process.env,
+          TMPDIR: this.env?.TMPDIR || "/tmp",
+          ...(this.env || {}),
+        },
         stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         windowsHide: true,
