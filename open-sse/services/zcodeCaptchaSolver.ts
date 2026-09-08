@@ -246,8 +246,6 @@ async function waitForCaptchaResult(
  * verification so no stale state survives into the next turn.
  */
 export class ZcodeCaptchaSolver {
-  private currentToken: { verifyParam: string; region: string } | null = null;
-
   constructor(
     private readonly dependencies: ZcodeCaptchaSolverDependencies = defaultDependencies
   ) {}
@@ -276,15 +274,17 @@ export class ZcodeCaptchaSolver {
         })(),
         timeoutMs
       );
-      this.currentToken = result;
       return result;
     } finally {
       await page.close().catch(() => {});
     }
   }
 
-  /** Clear any cached captcha result so the next solve obtains fresh verification. */
+  /**
+   * Invalidate the previous turn's verification. Solves are on-demand and
+   * single-use, so this is intentionally a no-op state barrier for callers.
+   */
   invalidate(): void {
-    this.currentToken = null;
+    // No token or in-flight promise is retained: every solve starts fresh.
   }
 }
