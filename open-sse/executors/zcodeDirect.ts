@@ -45,9 +45,10 @@ function errorMessage(error: unknown): string {
 }
 
 function endpointFor(baseURL: string, configured?: string): string {
-  const endpoint = configured?.trim() || baseURL.trim() || DEFAULT_ENDPOINT;
-  if (/\/chat\/completions(?:\/?(?:\?.*)?)?$/i.test(endpoint)) return endpoint;
-  return `${endpoint.replace(/\/+$/, "")}/chat/completions`;
+  const raw = configured?.trim() || baseURL.trim() || DEFAULT_ENDPOINT;
+  if (/\/chat\/completions(?:\/?(?:\?.*)?)?$/i.test(raw)) return raw;
+  const base = raw.replace(/\/anthropic\/?$/i, "").replace(/\/+$/, "");
+  return `${base}/chat/completions`;
 }
 
 function sseErrorResponse(status: number, message: string): Response {
@@ -58,6 +59,7 @@ function sseErrorResponse(status: number, message: string): Response {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
+      "x-omniroute-error-status": String(status),
     },
   });
 }

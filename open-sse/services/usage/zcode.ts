@@ -175,6 +175,7 @@ export async function getZCodeUsage(
     msg?: string;
     data?: {
       balances?: ZCodeBalanceItem[];
+      plans?: Array<{ name?: string }>;
     };
   }
 

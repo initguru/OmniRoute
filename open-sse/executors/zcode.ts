@@ -17,6 +17,11 @@ import {
 } from "./zcodeProtocol.ts";
 import { ZcodeCaptchaSolver } from "../services/zcodeCaptchaSolver.ts";
 import { buildErrorBody, errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
+import {
+  ZcodeDirectExecutor,
+  type ZcodeDirectExecutorOptions,
+  type ZcodeCaptchaSolver as ZcodeDirectCaptchaSolver,
+} from "./zcodeDirect.ts";
 
 const ZCODE_URL = "zcode://app-server/stdio";
 const ZCODE_ANTHROPIC_BASE_URL = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
@@ -87,6 +92,8 @@ export interface ZcodeExecutorOptions {
   clientFactory?: (options?: ZcodeClientFactoryOptions) => ZcodeClientLike;
   captchaSolver?: ZcodeCaptchaSolverLike;
   captchaTimeoutMs?: number;
+  directExecutorFactory?: (options?: ZcodeDirectExecutorOptions) => ZcodeDirectExecutor;
+  directExecutorOptions?: ZcodeDirectExecutorOptions;
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -269,6 +276,42 @@ function makeWorkspace(cwd: string): JsonRecord {
 
 function abortError(): Error {
   return new Error("ZCode request aborted");
+}
+
+function responseFromExecutorResult(result: ExecutorExecuteResult): Response {
+  if (result instanceof Response) return result;
+  return result.response;
+}
+
+function shouldFallbackToStdio(result: ExecutorExecuteResult): boolean {
+  const resp = responseFromExecutorResult(result);
+  const errorStatusHeader = resp.headers.get("x-omniroute-error-status");
+  const status = errorStatusHeader ? Number(errorStatusHeader) : resp.status;
+  return status === 401 || status === 403 || status >= 500;
+}
+
+function buildDirectExecutorOptions(
+  input: ExecuteInput,
+  configuredOptions?: ZcodeDirectExecutorOptions
+): ZcodeDirectExecutorOptions {
+  const credentials = input.credentials;
+  const psd = asRecord(credentials?.providerSpecificData);
+  const apiKey = credentials?.apiKey || psd.apiKey;
+  const baseURL = credentials?.baseUrl || psd.baseUrl || psd.baseURL;
+
+  const requestAuthOptions: Record<string, unknown> = {};
+  if (apiKey) requestAuthOptions.apiKey = String(apiKey);
+  if (baseURL) requestAuthOptions.baseURL = String(baseURL);
+
+  const mergedAuthOptions = {
+    ...asRecord(configuredOptions?.authOptions),
+    ...requestAuthOptions,
+  };
+
+  return {
+    ...configuredOptions,
+    ...(Object.keys(mergedAuthOptions).length > 0 ? { authOptions: mergedAuthOptions } : {}),
+  };
 }
 
 async function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal | null): Promise<T> {
@@ -506,6 +549,7 @@ export function notificationError(params: unknown): Error {
 }
 
 export class ZcodeExecutor extends BaseExecutor {
+  private static readonly activeExecutors = new Set<ZcodeExecutor>();
   private readonly options: ZcodeExecutorOptions;
   private readonly sessionCache = new Map<string, ZcodeSessionCacheEntry>();
 
@@ -515,6 +559,55 @@ export class ZcodeExecutor extends BaseExecutor {
       ...options,
       captchaSolver: options.captchaSolver || new ZcodeCaptchaSolver(),
     };
+    ZcodeExecutor.activeExecutors.add(this);
+  }
+
+  static async closeAll(): Promise<void> {
+    const all = Array.from(ZcodeExecutor.activeExecutors);
+    await Promise.all(all.map((e) => e.close().catch(() => undefined)));
+  }
+
+  async close(): Promise<void> {
+    ZcodeExecutor.activeExecutors.delete(this);
+    const entries = Array.from(this.sessionCache.values());
+    this.sessionCache.clear();
+    for (const entry of entries) {
+      if (entry.sessionId) {
+        await entry.client
+          .call("session/close", { sessionId: entry.sessionId })
+          .catch(() => undefined);
+      }
+      await entry.client.close().catch(() => undefined);
+    }
+  }
+
+  private shouldUseStdio(): boolean {
+    if (process.env.ZCODE_USE_STDIO === "1") return true;
+    if (
+      (this.options.clientFactory || this.options.command || this.options.args) &&
+      !this.options.directExecutorFactory
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private createDirectExecutor(directOptions?: ZcodeDirectExecutorOptions): ZcodeDirectExecutor {
+    if (this.options.directExecutorFactory) {
+      return this.options.directExecutorFactory(directOptions);
+    }
+    const solver = this.options.captchaSolver as unknown as Partial<ZcodeDirectCaptchaSolver>;
+    const directCaptchaSolver: ZcodeDirectCaptchaSolver | undefined =
+      solver && typeof solver.solve === "function"
+        ? {
+            solve: (opt) => solver.solve!(opt),
+            invalidate: () => (solver.invalidate ? solver.invalidate() : undefined),
+          }
+        : undefined;
+    return new ZcodeDirectExecutor({
+      ...(directCaptchaSolver ? { captchaSolver: directCaptchaSolver } : {}),
+      ...directOptions,
+    });
   }
 
   buildUrl(): string {
@@ -530,6 +623,26 @@ export class ZcodeExecutor extends BaseExecutor {
     if (!resolution.ok) {
       const message = "error" in resolution ? resolution.error : "Invalid ZCode model";
       return input.stream ? sseErrorResponse(400, message) : errorResponse(400, message);
+    }
+
+    if (!this.shouldUseStdio()) {
+      const directOptions = buildDirectExecutorOptions(input, this.options.directExecutorOptions);
+      const direct = this.createDirectExecutor(directOptions);
+      if (direct) {
+        let directResult: ExecutorExecuteResult | undefined;
+        try {
+          directResult = await direct.execute(input);
+        } catch (error) {
+          input.log?.warn?.(
+            "ZCODE",
+            `Direct API execution error: ${sanitizeErrorMessage(error instanceof Error ? error.message : String(error))}`
+          );
+        }
+        if (directResult && !shouldFallbackToStdio(directResult)) {
+          return directResult;
+        }
+        input.log?.warn?.("ZCODE", "Direct API unavailable; falling back to local app-server");
+      }
     }
 
     const body = asRecord(input.body);

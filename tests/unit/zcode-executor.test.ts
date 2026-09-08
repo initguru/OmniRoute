@@ -11,9 +11,21 @@ const fixture = join(process.cwd(), "tests/fixtures/fake-zcode-app-server.mjs");
 const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "omniroute-zcode-"));
 process.env.DATA_DIR = TEST_DATA_DIR;
 
-test.after(() =>
-  rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-);
+test.after(async () => {
+  try {
+    const { ZcodeExecutor } = await loadZcodeExecutor();
+    await ZcodeExecutor.closeAll();
+  } catch {
+    // Ignore executor cleanup error
+  }
+  try {
+    const { resetDbInstance } = await import("../../src/lib/db/core.ts");
+    resetDbInstance();
+  } catch {
+    // Ignore db cleanup error if db was not initialized
+  }
+  rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
 
 async function loadZcodeExecutor() {
   return import("../../open-sse/executors/zcode.ts");
@@ -651,4 +663,133 @@ test("ZCode accurately extracts and reports usage from turn.completed in both no
   assert.match(streamText, /"total_tokens":28922/);
   assert.match(streamText, /"cached_tokens":1024/);
   assert.match(streamText, /data: \[DONE\]/);
+});
+
+test("ZCode routes the default executor through the direct API when configured", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  const { ZcodeDirectExecutor } = await import("../../open-sse/executors/zcodeDirect.ts");
+  let fetchCalls = 0;
+  const direct = new ZcodeDirectExecutor({
+    authOptions: { apiKey: "direct-routing-key" },
+    captchaSolver: {
+      solve: async () => ({ verifyParam: "v".repeat(256), region: "sgp" }),
+      invalidate: () => undefined,
+    },
+    fetcher: async () => {
+      fetchCalls += 1;
+      return new Response(
+        JSON.stringify({
+          id: "direct-routing",
+          object: "chat.completion",
+          model: "glm-5.2",
+          choices: [{ message: { role: "assistant", content: "direct" }, finish_reason: "stop" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    },
+  });
+  const executor = new ZcodeExecutor({ directExecutorFactory: () => direct });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
+  const response = "response" in result ? result.response : result;
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, "direct");
+  assert.equal(fetchCalls, 1);
+  assert.equal("transport" in result ? result.transport : undefined, "zcode-direct-api");
+});
+
+test("ZCode passes request credentials to the direct executor", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  let receivedOptions: Record<string, unknown> | undefined;
+  const executor = new ZcodeExecutor({
+    directExecutorFactory: (options = {}) => {
+      receivedOptions = options as Record<string, unknown>;
+      return {
+        execute: async () =>
+          new Response(JSON.stringify({ choices: [{ message: { content: "direct" } }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      } as never;
+    },
+  });
+  await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {
+      apiKey: "request-direct-key",
+      providerSpecificData: { baseUrl: "https://request.example.test/api/v1/zcode-plan" },
+    },
+  });
+  assert.deepEqual(receivedOptions?.authOptions, {
+    apiKey: "request-direct-key",
+    baseURL: "https://request.example.test/api/v1/zcode-plan",
+  });
+});
+
+test("ZCode skips direct execution when stdio mode is explicitly enabled", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  const previous = process.env.ZCODE_USE_STDIO;
+  process.env.ZCODE_USE_STDIO = "1";
+  try {
+    const executor = new ZcodeExecutor({
+      directExecutorFactory: () => {
+        throw new Error("direct executor must not be constructed in stdio mode");
+      },
+      command: process.execPath,
+      args: [fixture],
+      cwd: process.cwd(),
+      requestTimeoutMs: 3000,
+      turnTimeoutMs: 3000,
+      captchaSolver: defaultCaptchaSolver,
+    });
+    const result = await executor.execute({
+      model: "glm-5.2",
+      body: requestBody(),
+      stream: false,
+      credentials: {},
+    });
+    const response = "response" in result ? result.response : result;
+    assert.equal(response.status, 200);
+  } finally {
+    if (previous === undefined) delete process.env.ZCODE_USE_STDIO;
+    else process.env.ZCODE_USE_STDIO = previous;
+  }
+});
+
+test("ZCode falls back to the legacy app-server after direct infrastructure failure", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  const { ZcodeDirectExecutor } = await import("../../open-sse/executors/zcodeDirect.ts");
+  const direct = new ZcodeDirectExecutor({
+    authOptions: { apiKey: "direct-routing-key" },
+    captchaSolver: {
+      solve: async () => ({ verifyParam: "v".repeat(256), region: "sgp" }),
+      invalidate: () => undefined,
+    },
+    fetcher: async () =>
+      new Response(JSON.stringify({ message: "direct upstream unavailable" }), { status: 503 }),
+  });
+  const executor = new ZcodeExecutor({
+    command: process.execPath,
+    args: [fixture],
+    cwd: process.cwd(),
+    requestTimeoutMs: 3000,
+    turnTimeoutMs: 3000,
+    captchaSolver: defaultCaptchaSolver,
+    directExecutorFactory: () => direct,
+  });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
+  const response = "response" in result ? result.response : result;
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, "fake zcode response");
 });
