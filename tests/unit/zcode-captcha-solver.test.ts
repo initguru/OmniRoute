@@ -139,7 +139,7 @@ test("ZcodeCaptchaSolver exposes solve and obtains a token through injected brow
       key: "zcode-captcha",
       options: {
         cookieDomain: ".alicdn.com",
-        headless: false,
+        headless: true,
       },
     },
   ]);

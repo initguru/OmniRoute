@@ -255,7 +255,7 @@ export class ZcodeCaptchaSolver {
     const timeoutMs = resolveTimeout(options?.timeoutMs);
     const pooled = await this.dependencies.acquireBrowserContext(CAPTCHA_POOL_KEY, {
       cookieDomain: CAPTCHA_COOKIE_DOMAIN,
-      headless: false,
+      headless: true,
     });
     const page = await this.dependencies.openPage(pooled);
 
