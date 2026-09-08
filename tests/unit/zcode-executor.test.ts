@@ -32,7 +32,7 @@ type RuntimeModel = {
 function createFakeClient(
   options: FakeClientOptions,
   behavior: FakeBehavior,
-  updates: RuntimeUpdate[],
+  updates: RuntimeUpdate[]
 ): ZcodeClientLike {
   const sessionId = "captcha-session";
   let sendCalls = 0;
@@ -43,14 +43,20 @@ function createFakeClient(
     call: async (method, params = {}) => {
       if (method === "workspace/readState") return { modelCatalog: { providers: [] } };
       if (method === "session/create") {
-        const preferenceResult = await options.onRequest("session/requestRuntimePreferences", { sessionId }, "server-1");
+        const preferenceResult = await options.onRequest(
+          "session/requestRuntimePreferences",
+          { sessionId },
+          "server-1"
+        );
         assert.deepEqual(preferenceResult, { nativeSearchEnhancementsEnabled: false });
         return { session: { sessionId, status: "idle" } };
       }
       if (method === "session/updateRuntimeModelConfig") {
         updates.push({ method, params });
         return {
-          appliedModelRuntimeRevision: (params as { runtimeModel?: { revision?: string } }).runtimeModel?.revision || "runtime-test",
+          appliedModelRuntimeRevision:
+            (params as { runtimeModel?: { revision?: string } }).runtimeModel?.revision ||
+            "runtime-test",
           changed: true,
           runtimeApplied: true,
           sessionId,
@@ -58,15 +64,19 @@ function createFakeClient(
       }
       if (method === "session/subscribe") return { sessionId, eventSeq: 0, events: [] };
       if (method === "session/send") {
-        const headerResult = await options.onRequest("interaction/requestProviderRuntimeHeaders", {
-          requestId: "request-test",
-          sessionId,
-          turnId: "turn-test",
-          workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
-          modelRef: { providerId: "builtin:zai-start-plan", modelId: "GLM-5.2" },
-          providerId: "builtin:zai-start-plan",
-          reason: "model-request",
-        }, "server-2");
+        const headerResult = await options.onRequest(
+          "interaction/requestProviderRuntimeHeaders",
+          {
+            requestId: "request-test",
+            sessionId,
+            turnId: "turn-test",
+            workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
+            modelRef: { providerId: "builtin:zai-start-plan", modelId: "GLM-5.2" },
+            providerId: "builtin:zai-start-plan",
+            reason: "model-request",
+          },
+          "server-2"
+        );
         assert.deepEqual(headerResult, { headersApplied: true });
         sendCalls += 1;
         if (behavior.failFirstSend && sendCalls === 1) {
@@ -145,18 +155,31 @@ test("ZCode accepts Coding Plan models and rejects unsafe or unknown ids", async
   assert.equal(resolveZcodeModel("unknown-model").ok, false);
 });
 
-for (const [model, officialId] of [["glm-5.3-flash", "GLM-5.3-Flash"], ["glm-5.3", "GLM-5.3"]] as const) {
+for (const [model, officialId] of [
+  ["glm-5.3-flash", "GLM-5.3-Flash"],
+  ["glm-5.3", "GLM-5.3"],
+] as const) {
   test(`ZCode maps ${model} to the official app-server model id`, async () => {
     const { ZcodeExecutor } = await loadZcodeExecutor();
     const updates: RuntimeUpdate[] = [];
     const executor = new ZcodeExecutor({
       captchaSolver: defaultCaptchaSolver,
-      clientFactory: (options = { onRequest: async () => ({}) }) => createFakeClient(options, {}, updates),
+      clientFactory: (options = { onRequest: async () => ({}) }) =>
+        createFakeClient(options, {}, updates),
     });
-    const result = await executor.execute({ model, body: requestBody(), stream: false, credentials: {} });
+    const result = await executor.execute({
+      model,
+      body: requestBody(),
+      stream: false,
+      credentials: {},
+    });
     const response = "response" in result ? result.response : result;
     assert.equal(response.status, 200);
-    const runtimeModel = (updates.find(({ method }) => method === "session/updateRuntimeModelConfig")?.params as { runtimeModel?: RuntimeModel }).runtimeModel;
+    const runtimeModel = (
+      updates.find(({ method }) => method === "session/updateRuntimeModelConfig")?.params as {
+        runtimeModel?: RuntimeModel;
+      }
+    ).runtimeModel;
     assert.equal(runtimeModel?.model?.providerId, "builtin:zai-start-plan");
     assert.equal(runtimeModel?.model?.modelId, officialId);
     assert.equal(runtimeModel?.provider?.providerId, "builtin:zai-start-plan");
@@ -194,7 +217,12 @@ test("ZCode selects the requested model during session creation when the default
       turnTimeoutMs: 3000,
       captchaSolver: defaultCaptchaSolver,
     });
-    const result = await executor.execute({ model, body: requestBody(), stream: false, credentials: {} });
+    const result = await executor.execute({
+      model,
+      body: requestBody(),
+      stream: false,
+      credentials: {},
+    });
     const response = "response" in result ? result.response : result;
     assert.equal(response.status, 200, `${model} should override the configured default model`);
   }
@@ -233,10 +261,16 @@ test("ZCode applies captcha headers through runtime model configuration", async 
   const executor = new ZcodeExecutor({
     captchaSolver: defaultCaptchaSolver,
     captchaTimeoutMs: 777,
-    clientFactory: (options = { onRequest: async () => ({}) }) => createFakeClient(options, {}, updates),
+    clientFactory: (options = { onRequest: async () => ({}) }) =>
+      createFakeClient(options, {}, updates),
   });
 
-  const result = await executor.execute({ model: "glm-5.2", body: requestBody(), stream: false, credentials: {} });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
   const response = "response" in result ? result.response : result;
   assert.equal(response.status, 200);
   assert.ok(updates.length >= 2);
@@ -244,9 +278,18 @@ test("ZCode applies captcha headers through runtime model configuration", async 
   assert.equal(runtimeModel.runtimeModel?.model?.providerId, "builtin:zai-start-plan");
   assert.equal(runtimeModel.runtimeModel?.model?.modelId, "GLM-5.2");
   assert.equal(runtimeModel.runtimeModel?.provider?.providerId, "builtin:zai-start-plan");
-  assert.equal(runtimeModel.runtimeModel?.provider?.baseURL, "https://zcode.z.ai/api/v1/zcode-plan/anthropic");
-  assert.equal(runtimeModel.runtimeModel?.provider?.headers?.["x-aliyun-captcha-verify-region"], "sgp");
-  assert.equal(runtimeModel.runtimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"]?.length, 256);
+  assert.equal(
+    runtimeModel.runtimeModel?.provider?.baseURL,
+    "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
+  );
+  assert.equal(
+    runtimeModel.runtimeModel?.provider?.headers?.["x-aliyun-captcha-verify-region"],
+    "sgp"
+  );
+  assert.equal(
+    runtimeModel.runtimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"]?.length,
+    256
+  );
 });
 
 test("ZCode refreshes captcha once after a 3007 verification failure", async () => {
@@ -269,32 +312,51 @@ test("ZCode refreshes captcha once after a 3007 verification failure", async () 
     clientFactory: (options = { onRequest: async () => ({}) }) => {
       clientsCreated += 1;
       lifecycle.push(`client-${clientsCreated}`);
-      return createFakeClient(options, {
-        failFirstSend: clientsCreated === 1,
-        onClose: async () => {
-          lifecycle.push(`close-${clientsCreated}`);
+      return createFakeClient(
+        options,
+        {
+          failFirstSend: clientsCreated === 1,
+          onClose: async () => {
+            lifecycle.push(`close-${clientsCreated}`);
+          },
         },
-      }, requests);
+        requests
+      );
     },
   });
 
-  const result = await executor.execute({ model: "glm-5.2", body: requestBody(), stream: false, credentials: {} });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
   const response = "response" in result ? result.response : result;
   assert.equal(response.status, 200);
   assert.equal(clientsCreated, 2);
   assert.equal(solveCalls, 2);
   assert.ok(lifecycle.indexOf("close-1") >= 0);
   assert.ok(lifecycle.indexOf("close-1") < lifecycle.lastIndexOf("client-2"));
-  const runtimeUpdates = requests.filter(({ method }) => method === "session/updateRuntimeModelConfig");
+  const runtimeUpdates = requests.filter(
+    ({ method }) => method === "session/updateRuntimeModelConfig"
+  );
   assert.equal(runtimeUpdates.length, 4);
-  const firstRuntimeModel = (runtimeUpdates[0]?.params as { runtimeModel?: RuntimeModel }).runtimeModel;
-  const secondAttemptRuntimeModel = (runtimeUpdates[2]?.params as { runtimeModel?: RuntimeModel }).runtimeModel;
+  const firstRuntimeModel = (runtimeUpdates[0]?.params as { runtimeModel?: RuntimeModel })
+    .runtimeModel;
+  const secondAttemptRuntimeModel = (runtimeUpdates[2]?.params as { runtimeModel?: RuntimeModel })
+    .runtimeModel;
   assert.equal(firstRuntimeModel?.model?.providerId, "builtin:zai-start-plan");
   assert.equal(firstRuntimeModel?.model?.modelId, "GLM-5.2");
-  assert.equal(firstRuntimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"], "a".repeat(256));
+  assert.equal(
+    firstRuntimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"],
+    "a".repeat(256)
+  );
   assert.equal(secondAttemptRuntimeModel?.model?.providerId, "builtin:zai-start-plan");
   assert.equal(secondAttemptRuntimeModel?.model?.modelId, "GLM-5.2");
-  assert.equal(secondAttemptRuntimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"], "b".repeat(256));
+  assert.equal(
+    secondAttemptRuntimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"],
+    "b".repeat(256)
+  );
 });
 
 test("ZCode rejects an unapplied runtime model before subscribing or sending", async () => {
@@ -308,7 +370,12 @@ test("ZCode rejects an unapplied runtime model before subscribing or sending", a
     turnTimeoutMs: 3000,
     captchaSolver: defaultCaptchaSolver,
   });
-  const result = await executor.execute({ model: "glm-5.2", body: requestBody(), stream: false, credentials: {} });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
   const response = "response" in result ? result.response : result;
   assert.equal(response.status, 502);
   assert.match(await response.text(), /runtime model/i);
@@ -336,21 +403,35 @@ for (const failureMode of ["event", "state"] as const) {
       clientFactory: (options: FakeClientOptions = { onRequest: async () => ({}) }) => {
         clientsCreated += 1;
         lifecycle.push(`client-${clientsCreated}`);
-        return createFakeClient({ ...options, failureNotifications: clientsCreated === 1 ? failureMode : undefined }, {
-          onClose: async () => {
-            lifecycle.push(`close-${clientsCreated}`);
+        return createFakeClient(
+          { ...options, failureNotifications: clientsCreated === 1 ? failureMode : undefined },
+          {
+            onClose: async () => {
+              lifecycle.push(`close-${clientsCreated}`);
+            },
           },
-        }, updates);
+          updates
+        );
       },
     });
-    const result = await executor.execute({ model: "glm-5.2", body: requestBody(), stream: false, credentials: {} });
+    const result = await executor.execute({
+      model: "glm-5.2",
+      body: requestBody(),
+      stream: false,
+      credentials: {},
+    });
     const response = "response" in result ? result.response : result;
     assert.equal(response.status, 200);
     assert.equal(solveCalls, 2);
     assert.equal(clientsCreated, 2);
     assert.ok(lifecycle.indexOf("close-1") >= 0);
     assert.ok(lifecycle.indexOf("close-1") < lifecycle.lastIndexOf("client-2"));
-    assert.equal((updates[2]?.params as { runtimeModel?: RuntimeModel }).runtimeModel?.provider?.headers?.["x-aliyun-captcha-verify-param"], "m".repeat(256));
+    assert.equal(
+      (updates[2]?.params as { runtimeModel?: RuntimeModel }).runtimeModel?.provider?.headers?.[
+        "x-aliyun-captcha-verify-param"
+      ],
+      "m".repeat(256)
+    );
   });
 }
 
@@ -365,10 +446,111 @@ test("ZCode buffers the completed turn into OpenAI SSE when stream=true", async 
     captchaSolver: defaultCaptchaSolver,
   });
 
-  const result = await executor.execute({ model: "glm-5.2", body: requestBody(), stream: true, credentials: {} });
+  const result = await executor.execute({
+    model: "glm-5.2",
+    body: requestBody(),
+    stream: true,
+    credentials: {},
+  });
   const response = "response" in result ? result.response : result;
   const text = await response.text();
   assert.equal(response.status, 200);
   assert.match(text, /fake zcode response/);
   assert.match(text, /data: \[DONE\]/);
+});
+
+test("ZCode accurately extracts and reports usage from turn.completed in both non-stream and stream modes", async () => {
+  const { ZcodeExecutor } = await loadZcodeExecutor();
+  const fakeUsage = {
+    source: "provider",
+    inputTokens: 28867,
+    outputTokens: 55,
+    totalTokens: 28922,
+    cacheReadTokens: 1024,
+  };
+
+  const clientFactory = (options: FakeClientOptions = { onRequest: async () => ({}) }) => {
+    return {
+      start: async () => undefined,
+      call: async (method: string, params: unknown = {}) => {
+        if (method === "workspace/readState") return { modelCatalog: { providers: [] } };
+        if (method === "session/create")
+          return { session: { sessionId: "usage-session", status: "idle" } };
+        if (method === "session/updateRuntimeModelConfig") {
+          const p = params as { runtimeModel?: { revision?: string } };
+          return {
+            appliedModelRuntimeRevision: p?.runtimeModel?.revision || "r1",
+            runtimeApplied: true,
+          };
+        }
+        if (method === "session/subscribe")
+          return { sessionId: "usage-session", eventSeq: 0, events: [] };
+        if (method === "session/send") {
+          queueMicrotask(() => {
+            options.onNotification?.("session/event", {
+              sessionId: "usage-session",
+              type: "turn.completed",
+              payload: {
+                response: "Hello from ZCode with precise usage!",
+                usage: fakeUsage,
+              },
+            });
+          });
+          return { accepted: true };
+        }
+        if (method === "session/close") return { closed: true };
+        return {};
+      },
+      close: async () => undefined,
+    };
+  };
+
+  const executor = new ZcodeExecutor({
+    captchaSolver: defaultCaptchaSolver,
+    clientFactory,
+  });
+
+  // 1. Non-streaming execution test
+  const nonStreamResult = await executor.execute({
+    model: "glm-5.3-flash",
+    body: requestBody(),
+    stream: false,
+    credentials: {},
+  });
+  const nonStreamRes = "response" in nonStreamResult ? nonStreamResult.response : nonStreamResult;
+  assert.equal(nonStreamRes.status, 200);
+  const json = (await nonStreamRes.json()) as {
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+    };
+  };
+  assert.equal(json.usage?.prompt_tokens, 28867);
+  assert.equal(json.usage?.completion_tokens, 55);
+  assert.equal(json.usage?.total_tokens, 28922);
+  assert.equal(json.usage?.prompt_tokens_details?.cached_tokens, 1024);
+
+  // Check transformedBody preserves context
+  assert.ok("transformedBody" in nonStreamResult);
+  const tb = nonStreamResult.transformedBody as Record<string, unknown>;
+  assert.equal(tb.model, "glm-5.3-flash");
+  assert.ok(Array.isArray(tb.messages));
+
+  // 2. Streaming execution test
+  const streamResult = await executor.execute({
+    model: "glm-5.3-flash",
+    body: requestBody(),
+    stream: true,
+    credentials: {},
+  });
+  const streamRes = "response" in streamResult ? streamResult.response : streamResult;
+  assert.equal(streamRes.status, 200);
+  const streamText = await streamRes.text();
+  assert.match(streamText, /"prompt_tokens":28867/);
+  assert.match(streamText, /"completion_tokens":55/);
+  assert.match(streamText, /"total_tokens":28922/);
+  assert.match(streamText, /"cached_tokens":1024/);
+  assert.match(streamText, /data: \[DONE\]/);
 });

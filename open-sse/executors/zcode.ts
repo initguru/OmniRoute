@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ZCODE_MODELS } from "../config/providers/registry/zcode/index.ts";
-import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult, type ProviderCredentials } from "./base.ts";
+import {
+  BaseExecutor,
+  type ExecuteInput,
+  type ExecutorExecuteResult,
+  type ProviderCredentials,
+} from "./base.ts";
 import {
   ZcodeAppServerClient,
   type ZcodeClientLike,
@@ -32,8 +37,26 @@ type ZcodeModelResolution = { ok: true; model: string } | { ok: false; error: st
 type ZcodeCaptcha = { verifyParam: string; region: string };
 type ZcodeCaptchaSolverLike = { solve(options?: { timeoutMs?: number }): Promise<ZcodeCaptcha> };
 type ZcodeModelRef = { providerId: string; modelId: string };
-type CompletionWaiter = { promise: Promise<string>; resolve: (text: string) => void; reject: (error: Error) => void };
-type RuntimeUpdateResult = { appliedModelRuntimeRevision?: unknown; changed?: unknown; runtimeApplied?: unknown };
+type ZcodeTurnUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cached_tokens?: number;
+};
+type ZcodeTurnResult = {
+  content: string;
+  usage?: ZcodeTurnUsage;
+};
+type CompletionWaiter = {
+  promise: Promise<ZcodeTurnResult>;
+  resolve: (result: ZcodeTurnResult | string) => void;
+  reject: (error: Error) => void;
+};
+type RuntimeUpdateResult = {
+  appliedModelRuntimeRevision?: unknown;
+  changed?: unknown;
+  runtimeApplied?: unknown;
+};
 
 export type ZcodeClientFactoryOptions = {
   onRequest: ZcodeIncomingRequestHandler;
@@ -55,7 +78,7 @@ export interface ZcodeExecutorOptions {
 }
 
 function asRecord(value: unknown): JsonRecord {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
 function textFromContent(content: unknown): string {
@@ -90,7 +113,10 @@ export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
   const requested = typeof model === "string" ? model.trim() : "";
   if (!requested) return { ok: true, model: DEFAULT_ZCODE_MODEL };
   if (requested.startsWith("-")) {
-    return { ok: false, error: `Invalid ZCode model \"${requested}\": model must not start with \"-\".` };
+    return {
+      ok: false,
+      error: `Invalid ZCode model \"${requested}\": model must not start with \"-\".`,
+    };
   }
   const normalized = requested.startsWith("zcode/") ? requested.slice("zcode/".length) : requested;
   if (!ZCODE_MODEL_ALLOWLIST.has(normalized)) {
@@ -103,7 +129,8 @@ export function resolveZcodeModel(model: unknown): ZcodeModelResolution {
 }
 
 function defaultCommand(): ZcodeCommand {
-  const entry = process.env.ZCODE_SERVER_ENTRY || "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+  const entry =
+    process.env.ZCODE_SERVER_ENTRY || "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
   return {
     command: process.env.ZCODE_SERVER_NODE || process.execPath,
     args: [entry, "app-server"],
@@ -123,15 +150,22 @@ function extractAssistantText(value: unknown): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = asRecord(messages[i]);
     const info = asRecord(message.info);
-    const role = typeof info.role === "string" ? info.role : typeof message.role === "string" ? message.role : undefined;
+    const role =
+      typeof info.role === "string"
+        ? info.role
+        : typeof message.role === "string"
+          ? message.role
+          : undefined;
     if (role && role !== "assistant") continue;
     const content = textFromContent(message.content);
     if (content.trim()) return content;
     const parts = Array.isArray(message.parts) ? message.parts : [];
-    const text = parts.map((part) => {
-      const record = asRecord(part);
-      return record.type === "text" && typeof record.text === "string" ? record.text : "";
-    }).join("");
+    const text = parts
+      .map((part) => {
+        const record = asRecord(part);
+        return record.type === "text" && typeof record.text === "string" ? record.text : "";
+      })
+      .join("");
     if (text.trim()) return text;
   }
   for (const candidate of [root.content, root.text, root.output_text, root.response]) {
@@ -180,7 +214,9 @@ function extractErrorCode(value: unknown): number | string | undefined {
 function isCaptchaVerifyFailure(value: unknown): boolean {
   const code = extractErrorCode(value);
   if (code === 3007 || code === "3007" || code === "CAPTCHA_VERIFY_FAILED") return true;
-  return /captcha[\s_-]*(?:verify|verification)[\s_-]*(?:failed|failure)/i.test(extractErrorMessage(value));
+  return /captcha[\s_-]*(?:verify|verification)[\s_-]*(?:failed|failure)/i.test(
+    extractErrorMessage(value)
+  );
 }
 
 function makeWorkspace(cwd: string): JsonRecord {
@@ -210,36 +246,95 @@ async function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal | null): P
   }
 }
 
-function completionResponse(model: string, prompt: string, content: string): Response {
-  const promptTokens = Math.max(1, Math.ceil(prompt.length / 4));
-  const completionTokens = Math.max(1, Math.ceil(content.length / 4));
-  return new Response(JSON.stringify({
-    id: `chatcmpl-zcode-${Date.now()}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-      estimated: true,
-    },
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
+function completionResponse(
+  model: string,
+  prompt: string,
+  content: string,
+  turnUsage?: ZcodeTurnUsage
+): Response {
+  const promptTokens = turnUsage?.prompt_tokens ?? Math.max(1, Math.ceil(prompt.length / 4));
+  const completionTokens =
+    turnUsage?.completion_tokens ?? Math.max(1, Math.ceil(content.length / 4));
+  const totalTokens = turnUsage?.total_tokens ?? promptTokens + completionTokens;
+  return new Response(
+    JSON.stringify({
+      id: `chatcmpl-zcode-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: totalTokens,
+        ...(turnUsage?.cached_tokens
+          ? { prompt_tokens_details: { cached_tokens: turnUsage.cached_tokens } }
+          : {}),
+        estimated: !turnUsage,
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
 }
 
-function sseResponse(model: string, content: string): Response {
+function sseResponse(
+  model: string,
+  content: string,
+  prompt: string,
+  turnUsage?: ZcodeTurnUsage
+): Response {
   const id = `chatcmpl-zcode-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
+  const promptTokens = turnUsage?.prompt_tokens ?? Math.max(1, Math.ceil(prompt.length / 4));
+  const completionTokens =
+    turnUsage?.completion_tokens ?? Math.max(1, Math.ceil(content.length / 4));
+  const totalTokens = turnUsage?.total_tokens ?? promptTokens + completionTokens;
   const chunks = [
-    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] },
-    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] },
-    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+    },
+    {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { content }, finish_reason: null }],
+    },
+    {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    },
+    {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: totalTokens,
+        ...(turnUsage?.cached_tokens
+          ? { prompt_tokens_details: { cached_tokens: turnUsage.cached_tokens } }
+          : {}),
+      },
+    },
   ];
   const body = `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
   return new Response(body, {
     status: 200,
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
   });
 }
 
@@ -247,7 +342,11 @@ function sseErrorResponse(status: number, message: string): Response {
   const body = `data: ${JSON.stringify(buildErrorBody(status, message))}\n\ndata: [DONE]\n\n`;
   return new Response(body, {
     status: 200,
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
   });
 }
 
@@ -269,7 +368,11 @@ function assertRuntimeModelApplied(value: unknown, runtimeModel: JsonRecord): vo
   if (applied === false || appliedRevision === "model-runtime:unapplied") {
     throw new Error("ZCode runtime model was not applied");
   }
-  if (typeof appliedRevision === "string" && appliedRevision !== revision && appliedRevision !== "runtime-revision") {
+  if (
+    typeof appliedRevision === "string" &&
+    appliedRevision !== revision &&
+    appliedRevision !== "runtime-revision"
+  ) {
     throw new Error("ZCode runtime model revision did not match");
   }
 }
@@ -277,7 +380,8 @@ function assertRuntimeModelApplied(value: unknown, runtimeModel: JsonRecord): vo
 function loadZcodeApiKey(): string | undefined {
   if (process.env.ZCODE_API_KEY) return process.env.ZCODE_API_KEY;
   try {
-    const configPath = process.env.ZCODE_CONFIG_PATH || path.join(os.homedir(), ".zcode", "cli", "config.json");
+    const configPath =
+      process.env.ZCODE_CONFIG_PATH || path.join(os.homedir(), ".zcode", "cli", "config.json");
     if (fs.existsSync(configPath)) {
       const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
       const key = parsed?.provider?.[DEFAULT_PROVIDER_ID]?.options?.apiKey;
@@ -289,7 +393,11 @@ function loadZcodeApiKey(): string | undefined {
   return undefined;
 }
 
-function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha, apiKey?: string): JsonRecord {
+function createRuntimeModel(
+  modelRef: ZcodeModelRef,
+  captcha: ZcodeCaptcha,
+  apiKey?: string
+): JsonRecord {
   const generatedAt = Date.now();
   return {
     revision: `omniroute-${generatedAt}-${randomUUID()}`,
@@ -307,22 +415,30 @@ function createRuntimeModel(modelRef: ZcodeModelRef, captcha: ZcodeCaptcha, apiK
         [CAPTCHA_VERIFY_PARAM_HEADER]: captcha.verifyParam,
         [CAPTCHA_VERIFY_REGION_HEADER]: captcha.region,
       },
-      models: [{
-        modelId: modelRef.modelId,
-        label: modelRef.modelId,
-        contextWindow: 1_000_000,
-        maxOutputTokens: 131_072,
-        supportsTools: true,
-      }],
+      models: [
+        {
+          modelId: modelRef.modelId,
+          label: modelRef.modelId,
+          contextWindow: 1_000_000,
+          maxOutputTokens: 131_072,
+          supportsTools: true,
+        },
+      ],
     },
   };
 }
 
 function createCompletionWaiter(): CompletionWaiter {
-  let resolve!: (text: string) => void;
+  let resolve!: (result: ZcodeTurnResult | string) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<string>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
+  const promise = new Promise<ZcodeTurnResult>((resolvePromise, rejectPromise) => {
+    resolve = (res) => {
+      if (typeof res === "string") {
+        resolvePromise({ content: res });
+      } else {
+        resolvePromise(res);
+      }
+    };
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
@@ -333,10 +449,12 @@ export function notificationError(params: unknown): Error {
   const nestedError = asRecord(root.error);
   const source = Object.keys(nestedError).length > 0 ? nestedError : root;
   const error = new Error(extractErrorMessage(source));
-  const outerCode = typeof source.code === "number" || typeof source.code === "string" ? source.code : undefined;
+  const outerCode =
+    typeof source.code === "number" || typeof source.code === "string" ? source.code : undefined;
   const providerCode = extractErrorCode(source);
   if (outerCode !== undefined) Object.assign(error, { code: outerCode });
-  if (providerCode !== undefined && providerCode !== outerCode) Object.assign(error, { providerCode });
+  if (providerCode !== undefined && providerCode !== outerCode)
+    Object.assign(error, { providerCode });
   for (const key of ["data", "context", "error"]) {
     if (source[key] !== undefined) Object.assign(error, { [key]: source[key] });
   }
@@ -370,20 +488,26 @@ export class ZcodeExecutor extends BaseExecutor {
     }
 
     const body = asRecord(input.body);
-    const messages = Array.isArray(body.messages) ? body.messages as OpenAIMsg[] : [];
+    const messages = Array.isArray(body.messages) ? (body.messages as OpenAIMsg[]) : [];
     const prompt = buildZcodePrompt(messages);
     input.log?.info?.("ZCODE", `local app-server turn started model=${resolution.model}`);
 
     try {
-      const content = await this.runTurn(resolution.model, prompt, input.signal, input.log);
+      const turnResult = await this.runTurn(resolution.model, prompt, input.signal, input.log);
       const response = input.stream
-        ? sseResponse(resolution.model, content)
-        : completionResponse(resolution.model, prompt, content);
+        ? sseResponse(resolution.model, turnResult.content, prompt, turnResult.usage)
+        : completionResponse(resolution.model, prompt, turnResult.content, turnResult.usage);
       return {
         response,
         url: ZCODE_URL,
         headers: {},
-        transformedBody: { model: resolution.model, promptLength: prompt.length, buffered: true },
+        transformedBody: {
+          ...body,
+          model: resolution.model,
+          prompt,
+          promptLength: prompt.length,
+          buffered: true,
+        },
         transport: "local-zcode-app-server",
       };
     } catch (error) {
@@ -396,7 +520,7 @@ export class ZcodeExecutor extends BaseExecutor {
   private createClient(
     captcha: ZcodeCaptcha,
     model: string,
-    onNotification: ZcodeNotificationHandler,
+    onNotification: ZcodeNotificationHandler
   ): ZcodeClientLike {
     let client: ZcodeClientLike | undefined;
     const apiKey = loadZcodeApiKey();
@@ -411,7 +535,8 @@ export class ZcodeExecutor extends BaseExecutor {
           providerId: DEFAULT_PROVIDER_ID,
           modelId: officialModelId(model),
         };
-        if (!client || !requestSessionId) throw new Error("ZCode runtime header request had no active session");
+        if (!client || !requestSessionId)
+          throw new Error("ZCode runtime header request had no active session");
         const runtimeModel = createRuntimeModel(modelRef, captcha, apiKey);
         const updateResult = await client.call("session/updateRuntimeModelConfig", {
           sessionId: requestSessionId,
@@ -434,8 +559,10 @@ export class ZcodeExecutor extends BaseExecutor {
       command,
       args,
       cwd: this.options.cwd || process.env.ZCODE_CWD || process.cwd(),
-      startupTimeoutMs: this.options.startupTimeoutMs ?? Number(process.env.ZCODE_STARTUP_TIMEOUT_MS || 10_000),
-      requestTimeoutMs: this.options.requestTimeoutMs ?? Number(process.env.ZCODE_RPC_TIMEOUT_MS || 30_000),
+      startupTimeoutMs:
+        this.options.startupTimeoutMs ?? Number(process.env.ZCODE_STARTUP_TIMEOUT_MS || 10_000),
+      requestTimeoutMs:
+        this.options.requestTimeoutMs ?? Number(process.env.ZCODE_RPC_TIMEOUT_MS || 30_000),
       onRequest,
       onNotification,
     });
@@ -446,11 +573,17 @@ export class ZcodeExecutor extends BaseExecutor {
     model: string,
     prompt: string,
     signal: AbortSignal | null | undefined,
-    log: ExecuteInput["log"],
-  ): Promise<string> {
-    for (let captchaRetryCount = 0; captchaRetryCount <= MAX_CAPTCHA_RETRIES; captchaRetryCount += 1) {
+    log: ExecuteInput["log"]
+  ): Promise<ZcodeTurnResult> {
+    for (
+      let captchaRetryCount = 0;
+      captchaRetryCount <= MAX_CAPTCHA_RETRIES;
+      captchaRetryCount += 1
+    ) {
       const captcha = await this.options.captchaSolver?.solve({
-        timeoutMs: this.options.captchaTimeoutMs ?? Number(process.env.ZCODE_CAPTCHA_TIMEOUT_MS || DEFAULT_CAPTCHA_TIMEOUT_MS),
+        timeoutMs:
+          this.options.captchaTimeoutMs ??
+          Number(process.env.ZCODE_CAPTCHA_TIMEOUT_MS || DEFAULT_CAPTCHA_TIMEOUT_MS),
       });
       if (!captcha) throw new Error("ZCode captcha solver returned no token");
 
@@ -464,20 +597,49 @@ export class ZcodeExecutor extends BaseExecutor {
           const candidate = extractAssistantText(patch);
           if (candidate.length > assistantText.length) assistantText = candidate;
           const status = patch.status ?? root.status;
-          if ((status === "completed" || status === "idle") && assistantText.trim()) waiter.resolve(assistantText);
+          if ((status === "completed" || status === "idle") && assistantText.trim())
+            waiter.resolve({ content: assistantText });
           if (status === "error" || status === "failed") waiter.reject(notificationError(patch));
           return;
         }
         if (method !== "session/event") return;
         const eventType = typeof root.type === "string" ? root.type : "";
         const payload = asRecord(root.payload);
-        if ((eventType === "part.delta" || eventType === "model.streaming") && typeof payload.delta === "string") {
+        if (
+          (eventType === "part.delta" || eventType === "model.streaming") &&
+          typeof payload.delta === "string"
+        ) {
           assistantText += payload.delta;
         }
-        if (eventType === "message.upserted" && typeof payload.content === "string") assistantText = payload.content;
+        if (eventType === "message.upserted" && typeof payload.content === "string")
+          assistantText = payload.content;
         if (eventType === "turn.completed") {
           const response = typeof payload.response === "string" ? payload.response : assistantText;
-          if (response.trim()) waiter.resolve(response);
+          const usageRecord = asRecord(payload.usage);
+          let usage: ZcodeTurnUsage | undefined;
+          const inputTokens =
+            typeof usageRecord.inputTokens === "number" ? usageRecord.inputTokens : undefined;
+          const outputTokens =
+            typeof usageRecord.outputTokens === "number" ? usageRecord.outputTokens : undefined;
+          const totalTokens =
+            typeof usageRecord.totalTokens === "number" ? usageRecord.totalTokens : undefined;
+          const cacheReadTokens =
+            typeof usageRecord.cacheReadTokens === "number"
+              ? usageRecord.cacheReadTokens
+              : undefined;
+          if (
+            inputTokens !== undefined ||
+            outputTokens !== undefined ||
+            totalTokens !== undefined
+          ) {
+            usage = {
+              prompt_tokens: inputTokens,
+              completion_tokens: outputTokens,
+              total_tokens: totalTokens ?? (inputTokens ?? 0) + (outputTokens ?? 0),
+              cached_tokens: cacheReadTokens,
+            };
+          }
+          if (response.trim()) waiter.resolve({ content: response, usage });
         } else if (eventType === "turn.failed") {
           waiter.reject(notificationError(payload));
         }
@@ -490,32 +652,53 @@ export class ZcodeExecutor extends BaseExecutor {
       let sessionId: string | undefined;
 
       try {
-      await raceAbort(client.start(), signal);
-      await raceAbort(client.call("workspace/readState", { workspace }), signal);
-      const created = await raceAbort(client.call("session/create", {
-        workspace,
-        model: { providerId, modelId: officialModelId(model) },
-      }), signal);
-      sessionId = extractSessionId(created);
-      if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
+        await raceAbort(client.start(), signal);
+        await raceAbort(client.call("workspace/readState", { workspace }), signal);
+        const created = await raceAbort(
+          client.call("session/create", {
+            workspace,
+            model: { providerId, modelId: officialModelId(model) },
+          }),
+          signal
+        );
+        sessionId = extractSessionId(created);
+        if (!sessionId) throw new Error("ZCode session/create returned no sessionId");
 
-      const runtimeModel = createRuntimeModel({ providerId, modelId: officialModelId(model) }, captcha, apiKey);
-      const updateResult = await raceAbort(client.call("session/updateRuntimeModelConfig", {
-        sessionId,
-        runtimeModel,
-        applyModelSelection: true,
-      }), signal);
-      assertRuntimeModelApplied(updateResult, runtimeModel);
-      await raceAbort(client.call("session/subscribe", {
-        sessionId,
-        deliveryKind: "desktop-continuous",
-      }), signal);
-      await raceAbort(client.call("session/send", { sessionId, content: prompt }), signal);
+        const runtimeModel = createRuntimeModel(
+          { providerId, modelId: officialModelId(model) },
+          captcha,
+          apiKey
+        );
+        const updateResult = await raceAbort(
+          client.call("session/updateRuntimeModelConfig", {
+            sessionId,
+            runtimeModel,
+            applyModelSelection: true,
+          }),
+          signal
+        );
+        assertRuntimeModelApplied(updateResult, runtimeModel);
+        await raceAbort(
+          client.call("session/subscribe", {
+            sessionId,
+            deliveryKind: "desktop-continuous",
+          }),
+          signal
+        );
+        await raceAbort(client.call("session/send", { sessionId, content: prompt }), signal);
 
-      const turnTimeoutMs = this.options.turnTimeoutMs ?? Number(process.env.ZCODE_TURN_TIMEOUT_MS || DEFAULT_TURN_TIMEOUT_MS);
-      completionTimer = setTimeout(() => waiter.reject(new Error("ZCode turn timed out before an assistant response was available")), Math.max(1, turnTimeoutMs));
-      completionTimer.unref?.();
-      return await raceAbort(waiter.promise, signal);
+        const turnTimeoutMs =
+          this.options.turnTimeoutMs ??
+          Number(process.env.ZCODE_TURN_TIMEOUT_MS || DEFAULT_TURN_TIMEOUT_MS);
+        completionTimer = setTimeout(
+          () =>
+            waiter.reject(
+              new Error("ZCode turn timed out before an assistant response was available")
+            ),
+          Math.max(1, turnTimeoutMs)
+        );
+        completionTimer.unref?.();
+        return await raceAbort(waiter.promise, signal);
       } catch (error) {
         if (!isCaptchaVerifyFailure(error) || captchaRetryCount >= MAX_CAPTCHA_RETRIES) throw error;
         continue;
@@ -524,7 +707,11 @@ export class ZcodeExecutor extends BaseExecutor {
         if (sessionId) {
           await client.call("session/close", { sessionId }).catch(() => undefined);
         }
-        await client.close().catch((error) => log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`));
+        await client
+          .close()
+          .catch((error) =>
+            log?.debug?.("ZCODE", `app-server close failed: ${sanitizeErrorMessage(error)}`)
+          );
       }
     }
     throw new Error("ZCode captcha retry exhausted");
