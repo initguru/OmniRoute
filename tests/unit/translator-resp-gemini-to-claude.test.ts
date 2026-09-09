@@ -107,7 +107,8 @@ test("Gemini -> Claude stream: functionCall becomes tool_use and MAX_TOKENS maps
   assert.equal(result[2].delta.partial_json, JSON.stringify({ path: "/tmp/a" }));
   assert.equal(result[3].type, "content_block_stop");
   assert.equal(result[4].delta.stop_reason, "tool_use");
-  assert.equal(result[4].usage.input_tokens, 5);
+  // promptTokenCount (5) - cachedContentTokenCount (1) = fresh input_tokens (4)
+  assert.equal(result[4].usage.input_tokens, 4);
   assert.equal(result[4].usage.output_tokens, 5);
   assert.equal(result[4].usage.cache_read_input_tokens, 1);
   assert.equal(result[5].type, "message_stop");
@@ -143,9 +144,8 @@ test("Gemini -> Claude stream: STOP after prior tool use still maps to tool_use"
 });
 
 test("Gemini -> Claude stream: stores thoughtSignature from a standalone part preceding functionCall", async () => {
-  const { getGeminiThoughtSignature, clearGeminiThoughtSignatureMemoryForTests } = await import(
-    "../../open-sse/services/geminiThoughtSignatureStore.ts"
-  );
+  const { getGeminiThoughtSignature, clearGeminiThoughtSignatureMemoryForTests } =
+    await import("../../open-sse/services/geminiThoughtSignatureStore.ts");
   clearGeminiThoughtSignatureMemoryForTests();
 
   const state: { signatureNamespace: string; pendingThoughtSignature?: string | null } = {
