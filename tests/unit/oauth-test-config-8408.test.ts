@@ -23,6 +23,45 @@ test("#8408: devin-cli and agy are present in OAUTH_TEST_CONFIG", () => {
   );
 });
 
+test("Antigravity OAuth probe rejects unknown persisted profiles instead of defaulting to IDE", () => {
+  const config = OAUTH_TEST_CONFIG.agy;
+  assert.ok(config.buildProbe);
+  assert.throws(
+    () =>
+      config.buildProbe!(
+        { provider: "agy", providerSpecificData: { clientProfile: "unexpected-profile" } },
+        "token"
+      ),
+    /compatibility contract rejected profile/
+  );
+});
+
+test("Antigravity OAuth probe rejects non-string persisted profiles instead of defaulting to IDE", () => {
+  const config = OAUTH_TEST_CONFIG.antigravity;
+  assert.ok(config.buildProbe);
+  assert.throws(
+    () =>
+      config.buildProbe!(
+        { provider: "antigravity", providerSpecificData: { clientProfile: 42 } },
+        "token"
+      ),
+    /compatibility contract rejected profile/
+  );
+});
+
+test("Antigravity OAuth probe keeps provider defaults when no profile is persisted", () => {
+  const agyProbe = OAUTH_TEST_CONFIG.agy.buildProbe!(
+    { provider: "agy", providerSpecificData: {} },
+    "token"
+  );
+  const ideProbe = OAUTH_TEST_CONFIG.antigravity.buildProbe!(
+    { provider: "antigravity", providerSpecificData: {} },
+    "token"
+  );
+  assert.match(agyProbe.headers["User-Agent"], /^antigravity\/cli\//);
+  assert.match(ideProbe.headers["User-Agent"], /^antigravity\/ide\//);
+});
+
 test("devin-desktop connection test is import-only and not refreshable (#8228)", () => {
   const config = (OAUTH_TEST_CONFIG as Record<string, { refreshable?: boolean }>)["devin-desktop"];
   assert.ok(config, "devin-desktop must have an OAuth test config");

@@ -36,8 +36,8 @@ test("AntigravityExecutor.execute auto-retries short 429 responses and collects 
   const originalFetch = globalThis.fetch;
   const originalSetTimeout = globalThis.setTimeout;
   const calls = [];
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 
   globalThis.fetch = async (url) => {
     calls.push(String(url));

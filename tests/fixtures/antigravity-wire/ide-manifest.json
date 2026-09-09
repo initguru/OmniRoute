@@ -1,0 +1,21 @@
+{
+  "contractId": "antigravity-wire-ide-synthetic-v1",
+  "profile": "ide",
+  "product": "antigravity-ide",
+  "clientVersion": "unknown",
+  "platform": "synthetic",
+  "authMode": "consumer-oauth",
+  "binarySha256": "",
+  "capturedAt": "1970-01-01T00:00:00.000Z",
+  "source": "synthetic-only",
+  "surfaces": ["oauth", "bootstrap", "content", "usage", "credits", "image", "mitm"],
+  "dynamicRules": [
+    {
+      "path": "/headers/2/1",
+      "kind": "credential",
+      "format": "opaque",
+      "headerName": "authorization",
+      "scheme": "Bearer"
+    }
+  ]
+}

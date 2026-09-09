@@ -81,11 +81,18 @@ for (const [name, provider, expectedProfile] of [
         );
         assert.equal(headers.get("X-Goog-Api-Client"), "gl-node/22.21.1");
       } else {
-        assert.match(headers.get("User-Agent") ?? "", /^antigravity\/cli\/1\.1\.1 /);
+        assert.match(headers.get("User-Agent") ?? "", /^antigravity\/cli\/1\.1\.5 /);
         assert.equal(headers.get("X-Goog-Api-Client"), null);
       }
       assert.equal(headers.get("Client-Metadata"), null);
     }
     assert.equal(mapped.providerSpecificData.clientProfile, expectedProfile);
+    assert.equal(
+      mapped.providerSpecificData.clientContractId,
+      `antigravity-wire-${expectedProfile}-synthetic-v1`
+    );
+    assert.equal(mapped.providerSpecificData.clientObservedVersion, null);
+    assert.equal(mapped.providerSpecificData.clientVersionState, "unverified");
+    assert.equal(mapped.providerSpecificData.clientContextSource, "credential");
   });
 }

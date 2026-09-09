@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { AntigravityExecutor } from "../../open-sse/executors/antigravity.ts";
+import { tryCreditsRetry } from "../../open-sse/executors/antigravity/executeAttempt.ts";
+import { setCliCompatProviders } from "../../open-sse/config/cliFingerprints.ts";
+import { antigravityCliUserAgent } from "../../open-sse/services/antigravityHeaders.ts";
 import {
   clearAntigravityVersionCaches,
   seedAntigravityIdeVersionCache,
@@ -43,6 +46,47 @@ async function withEnv<T>(
 
 test.afterEach(() => {
   clearAntigravityVersionCaches();
+  setCliCompatProviders([]);
+});
+
+test("tryCreditsRetry resolves omitted context before CLI serialization", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalMode = process.env.ANTIGRAVITY_CREDITS;
+  const captured: { headers?: Headers; body?: Record<string, unknown> } = {};
+  seedAntigravityCliVersionCache("1.1.1");
+  setCliCompatProviders(["antigravity"]);
+  globalThis.fetch = async (_url, init) => {
+    captured.headers = new Headers(init?.headers);
+    captured.body = JSON.parse(await readRequestBody(init?.body)) as Record<string, unknown>;
+    return new Response("ok", { status: 200 });
+  };
+
+  try {
+    const result = await tryCreditsRetry(
+      "antigravity",
+      "https://example.test/v1internal:streamGenerateContent?alt=sse",
+      { Authorization: "Bearer token", "Content-Type": "application/json" },
+      { project: "project-1", request: { contents: [] } },
+      {
+        accessToken: "omitted-context-token",
+        projectId: "project-1",
+        providerSpecificData: { clientProfile: "cli" },
+      },
+      true,
+      undefined,
+      { debug() {}, info() {}, warn() {}, error() {} },
+      "omitted-context-account",
+      () => {}
+    );
+
+    assert.equal(result?.response.status, 200);
+    assert.equal(captured.headers?.get("User-Agent"), antigravityCliUserAgent("1.1.1"));
+    assert.deepEqual(captured.body?.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalMode === undefined) delete process.env.ANTIGRAVITY_CREDITS;
+    else process.env.ANTIGRAVITY_CREDITS = originalMode;
+  }
 });
 
 test("AntigravityExecutor keeps tool-name maps internal across credits request paths", async () => {
@@ -52,8 +96,8 @@ test("AntigravityExecutor keeps tool-name maps internal across credits request p
     ["weather", "ns:weather"],
     ["long_tool_alias", longOriginal],
   ]);
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 
   const success = () =>
     new Response(
@@ -125,8 +169,8 @@ test("AntigravityExecutor keeps tool-name maps internal across credits request p
 test("client aborts during credits retry do not disable future credits attempts", async () => {
   const originalFetch = globalThis.fetch;
   const authKey = "credits-client-abort-token";
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -185,8 +229,8 @@ test("client aborts during credits retry do not disable future credits attempts"
 
 test("AntigravityExecutor credits modes control envelopes and eligible retry counts", async (t) => {
   const originalFetch = globalThis.fetch;
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 
   const success = () =>
     new Response(
@@ -229,66 +273,72 @@ test("AntigravityExecutor credits modes control envelopes and eligible retry cou
       assert.equal(bodies[0].enabledCreditTypes, undefined);
     });
 
-    await t.test("retry sends no credits first and injects exactly once after eligible 429", async () => {
-      const bodies: Array<Record<string, unknown>> = [];
-      globalThis.fetch = async (_url, init) => {
-        bodies.push(JSON.parse(await readRequestBody(init?.body)));
-        return bodies.length === 1 ? quota429() : success();
-      };
+    await t.test(
+      "retry sends no credits first and injects exactly once after eligible 429",
+      async () => {
+        const bodies: Array<Record<string, unknown>> = [];
+        globalThis.fetch = async (_url, init) => {
+          bodies.push(JSON.parse(await readRequestBody(init?.body)));
+          return bodies.length === 1 ? quota429() : success();
+        };
 
-      const result = await withEnv("ANTIGRAVITY_CREDITS", "retry", () =>
-        new AntigravityExecutor().execute({
-          model: "antigravity/gemini-2.5-flash",
-          body: { request: { contents: [{ role: "user", parts: [{ text: "hello" }] }] } },
-          stream: true,
-          credentials: { accessToken: "credits-retry-token", projectId: "project-1" },
-          log: { debug() {}, warn() {}, info() {} },
-        })
-      );
-
-      assert.equal(result.response.status, 200);
-      assert.equal(bodies.length, 2);
-      assert.equal(bodies[0].enabledCreditTypes, undefined);
-      assert.deepEqual(bodies[1].enabledCreditTypes, ["GOOGLE_ONE_AI"]);
-    });
-
-    await t.test("retry injects credits at most once when quota exhaustion persists across fallbacks", async () => {
-      const bodies: Array<Record<string, unknown>> = [];
-      const originalSetTimeout = globalThis.setTimeout;
-      globalThis.fetch = async (_url, init) => {
-        bodies.push(JSON.parse(await readRequestBody(init?.body)));
-        return quota429();
-      };
-      globalThis.setTimeout = ((callback) => {
-        (callback as () => void)();
-        return 0;
-      }) as typeof setTimeout;
-
-      try {
         const result = await withEnv("ANTIGRAVITY_CREDITS", "retry", () =>
           new AntigravityExecutor().execute({
             model: "antigravity/gemini-2.5-flash",
             body: { request: { contents: [{ role: "user", parts: [{ text: "hello" }] }] } },
             stream: true,
-            credentials: {
-              accessToken: "credits-persistent-429-token",
-              connectionId: "credits-persistent-429-connection",
-              projectId: "project-1",
-            },
+            credentials: { accessToken: "credits-retry-token", projectId: "project-1" },
             log: { debug() {}, warn() {}, info() {} },
           })
         );
 
-        assert.equal(result.response.status, 429);
-        assert.equal(bodies.length, 9);
-        assert.equal(bodies.filter((body) => body.enabledCreditTypes !== undefined).length, 1);
+        assert.equal(result.response.status, 200);
+        assert.equal(bodies.length, 2);
         assert.equal(bodies[0].enabledCreditTypes, undefined);
         assert.deepEqual(bodies[1].enabledCreditTypes, ["GOOGLE_ONE_AI"]);
-        assert.ok(bodies.slice(2).every((body) => body.enabledCreditTypes === undefined));
-      } finally {
-        globalThis.setTimeout = originalSetTimeout;
       }
-    });
+    );
+
+    await t.test(
+      "retry injects credits at most once when quota exhaustion persists across fallbacks",
+      async () => {
+        const bodies: Array<Record<string, unknown>> = [];
+        const originalSetTimeout = globalThis.setTimeout;
+        globalThis.fetch = async (_url, init) => {
+          bodies.push(JSON.parse(await readRequestBody(init?.body)));
+          return quota429();
+        };
+        globalThis.setTimeout = ((callback) => {
+          (callback as () => void)();
+          return 0;
+        }) as typeof setTimeout;
+
+        try {
+          const result = await withEnv("ANTIGRAVITY_CREDITS", "retry", () =>
+            new AntigravityExecutor().execute({
+              model: "antigravity/gemini-2.5-flash",
+              body: { request: { contents: [{ role: "user", parts: [{ text: "hello" }] }] } },
+              stream: true,
+              credentials: {
+                accessToken: "credits-persistent-429-token",
+                connectionId: "credits-persistent-429-connection",
+                projectId: "project-1",
+              },
+              log: { debug() {}, warn() {}, info() {} },
+            })
+          );
+
+          assert.equal(result.response.status, 429);
+          assert.equal(bodies.length, 9);
+          assert.equal(bodies.filter((body) => body.enabledCreditTypes !== undefined).length, 1);
+          assert.equal(bodies[0].enabledCreditTypes, undefined);
+          assert.deepEqual(bodies[1].enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+          assert.ok(bodies.slice(2).every((body) => body.enabledCreditTypes === undefined));
+        } finally {
+          globalThis.setTimeout = originalSetTimeout;
+        }
+      }
+    );
 
     await t.test("always injects credits on the first and only successful call", async () => {
       const bodies: Array<Record<string, unknown>> = [];

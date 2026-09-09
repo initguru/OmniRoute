@@ -8,6 +8,7 @@ import {
 import { validateProviderSpecificData } from "../../src/shared/validation/providerSpecificData.ts";
 import {
   applyAntigravityClientProfileHeaders,
+  getAntigravityClientContext,
   getAntigravityClientProfile,
 } from "../../open-sse/services/antigravityClientProfile.ts";
 import { getAntigravityEnvelopeUserAgent } from "../../open-sse/services/antigravityIdentity.ts";
@@ -65,6 +66,34 @@ test("getAntigravityClientProfile preserves legacy CLI identity for persisted va
   assert.equal(
     getAntigravityClientProfile({ providerSpecificData: { clientProfile: "harness" } }),
     "cli"
+  );
+});
+
+test("client context restores legacy CLI aliases and rejects invalid persisted profiles", () => {
+  assert.equal(
+    getAntigravityClientContext("antigravity", {
+      providerSpecificData: {
+        clientProfile: "sdk",
+        clientContractId: "antigravity-wire-cli-synthetic-v1",
+        clientObservedVersion: null,
+        clientVersionState: "unverified",
+        clientContextSource: "credential",
+      },
+    }).profile,
+    "cli"
+  );
+  assert.throws(
+    () =>
+      getAntigravityClientContext("antigravity", {
+        providerSpecificData: {
+          clientProfile: "unexpected-profile",
+          clientContractId: "antigravity-wire-ide-synthetic-v1",
+          clientObservedVersion: null,
+          clientVersionState: "unverified",
+          clientContextSource: "credential",
+        },
+      }),
+    /compatibility contract rejected profile/
   );
 });
 

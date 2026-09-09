@@ -1,11 +1,21 @@
 import {
-  DEFAULT_ANTIGRAVITY_CLIENT_PROFILE,
   normalizeAntigravityClientProfile,
   type AntigravityClientProfile,
 } from "@/shared/constants/antigravityClientProfile";
-import { getAntigravityContentHeaders } from "./antigravityHeaders.ts";
+import {
+  assertAntigravityClientContextCompatible,
+  createAntigravityClientContext,
+  type AntigravityClientContext,
+} from "../config/antigravityClient.ts";
+import type { ProviderCredentials } from "../executors/base.ts";
+import {
+  getAntigravityContentHeaders,
+  resolveAntigravityClientProfile,
+} from "./antigravityHeaders.ts";
 import type { AntigravityCredentialsLike } from "./antigravityIdentity.ts";
 import {
+  ANTIGRAVITY_CLI_FALLBACK_VERSION,
+  ANTIGRAVITY_IDE_FALLBACK_VERSION,
   resolveAntigravityCliVersion,
   resolveAntigravityIdeVersion,
 } from "./antigravityVersion.ts";
@@ -16,6 +26,15 @@ export {
   normalizeAntigravityClientProfile,
   type AntigravityClientProfile,
 } from "@/shared/constants/antigravityClientProfile";
+export {
+  ANTIGRAVITY_COMPATIBILITY_ERROR_CODE,
+  assertAntigravityClientContextCompatible,
+  createAntigravityClientContext,
+  getAntigravityClientContract,
+  type AntigravityClientContext,
+  type AntigravityClientContract,
+  type AntigravityVersionState,
+} from "../config/antigravityClient.ts";
 
 type AntigravityProfileCredentials = AntigravityCredentialsLike & {
   providerSpecificData?: Record<string, unknown> | null;
@@ -43,10 +62,58 @@ export function getAntigravityClientProfile(
   return normalizeAntigravityClientProfile(fromProviderData);
 }
 
+function readPersistedContextProfile(value: unknown): AntigravityClientProfile {
+  return resolveAntigravityClientProfile(value);
+}
+
 export function resolveAntigravityClientVersion(
   profile: AntigravityClientProfile
 ): Promise<string> {
   return profile === "cli" ? resolveAntigravityCliVersion() : resolveAntigravityIdeVersion();
+}
+
+/** Build one request-start compatibility context without exposing credential material. */
+export function getAntigravityClientContext(
+  provider: string,
+  credentials: ProviderCredentials | null | undefined,
+  observedVersion?: string | null
+): AntigravityClientContext {
+  const providerSpecificData = credentials?.providerSpecificData;
+  if (observedVersion === undefined && providerSpecificData) {
+    const storedProfile = providerSpecificData.clientProfile;
+    const storedContractId = providerSpecificData.clientContractId;
+    const storedObservedVersion = providerSpecificData.clientObservedVersion;
+    const storedVersionState = providerSpecificData.clientVersionState;
+    const storedSource = providerSpecificData.clientContextSource;
+    if (
+      typeof storedProfile === "string" &&
+      typeof storedContractId === "string" &&
+      (storedObservedVersion === null || typeof storedObservedVersion === "string") &&
+      typeof storedVersionState === "string" &&
+      typeof storedSource === "string"
+    ) {
+      const storedContext = {
+        profile: readPersistedContextProfile(storedProfile),
+        contractId: storedContractId,
+        observedVersion: storedObservedVersion,
+        versionState: storedVersionState,
+        source: storedSource,
+      } as AntigravityClientContext;
+      assertAntigravityClientContextCompatible(storedContext);
+      return storedContext;
+    }
+  }
+  const hasPersistedProfile =
+    providerSpecificData && typeof providerSpecificData.clientProfile === "string";
+  if (observedVersion === undefined && hasPersistedProfile) {
+    const profile = getAntigravityClientProfile(credentials);
+    return createAntigravityClientContext(
+      provider,
+      credentials,
+      profile === "cli" ? ANTIGRAVITY_CLI_FALLBACK_VERSION : ANTIGRAVITY_IDE_FALLBACK_VERSION
+    );
+  }
+  return createAntigravityClientContext(provider, credentials, observedVersion);
 }
 
 export function removeHeaderCaseInsensitive(headers: Record<string, string>, name: string): void {
@@ -67,13 +134,41 @@ function getProjectHeaderValue(body: unknown): string | null {
 }
 
 /** Apply the selected official client identity to a Cloud Code content request. */
+export function getAntigravityClientContextMetadata(
+  context: AntigravityClientContext
+): Record<string, string | null> {
+  return {
+    clientProfile: context.profile,
+    clientContractId: context.contractId,
+    clientObservedVersion: context.observedVersion,
+    clientVersionState: context.versionState,
+    clientContextSource: context.source,
+  };
+}
+
 export function applyAntigravityClientProfileHeaders(
   headers: Record<string, string>,
   credentials: AntigravityProfileCredentials | null | undefined,
-  body: unknown
-): AntigravityClientProfile {
+  body: unknown,
+  context?: AntigravityClientContext
+): AntigravityClientContext {
   const profile = getAntigravityClientProfile(credentials);
-  const identityHeaders = getAntigravityContentHeaders(profile);
+  const resolvedContext =
+    context ??
+    createAntigravityClientContext(
+      profile === "cli" ? "agy" : "antigravity",
+      credentials as ProviderCredentials | null | undefined
+    );
+  assertAntigravityClientContextCompatible(resolvedContext);
+  if (resolvedContext.profile !== profile && credentials?.providerSpecificData?.clientProfile) {
+    throw new Error("Antigravity client context profile does not match credentials");
+  }
+  const identityHeaders = context
+    ? getAntigravityContentHeaders(
+        { accessToken: credentials?.accessToken ?? undefined },
+        resolvedContext
+      )
+    : getAntigravityContentHeaders(profile, credentials?.accessToken ?? undefined);
 
   removeHeaderCaseInsensitive(headers, "User-Agent");
   headers["User-Agent"] = identityHeaders["User-Agent"];
@@ -87,5 +182,5 @@ export function applyAntigravityClientProfileHeaders(
     headers["x-goog-user-project"] = project;
   }
 
-  return profile;
+  return resolvedContext;
 }

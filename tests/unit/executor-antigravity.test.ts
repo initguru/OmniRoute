@@ -2,13 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { AntigravityExecutor } from "../../open-sse/executors/antigravity.ts";
+import { sendAntigravityRequest } from "../../open-sse/executors/antigravity/executeAttempt.ts";
 import { setCliCompatProviders } from "../../open-sse/config/cliFingerprints.ts";
 import { scrubProxyAndFingerprintHeaders } from "../../open-sse/services/antigravityHeaderScrub.ts";
 import { antigravityIdeUserAgent } from "../../open-sse/services/antigravityHeaders.ts";
 import {
   clearAntigravityVersionCaches,
   seedAntigravityIdeVersionCache,
-  seedAntigravityCliVersionCache,
 } from "../../open-sse/services/antigravityVersion.ts";
 import { clearAntigravityProjectCache } from "../../open-sse/services/antigravityProjectBootstrap.ts";
 import { runWithCapture } from "../../open-sse/utils/providerRequestLogging.ts";
@@ -66,6 +66,198 @@ test.afterEach(() => {
   clearAntigravityVersionCaches();
 });
 
+test("AntigravityExecutor exposes frozen retry state for token-refresh re-entry", async () => {
+  const originalFetch = globalThis.fetch;
+  seedAntigravityIdeVersionCache("2026.4.17");
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(await new Response(init?.body as BodyInit).text()));
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}]}}\n\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  };
+
+  try {
+    const executor = new AntigravityExecutor();
+    const input = {
+      model: "antigravity/gemini-2.5-flash",
+      body: {
+        request: { contents: [{ role: "user", parts: [{ text: "hello" }] }] },
+      },
+      stream: true,
+      credentials: {
+        accessToken: "retry-state-token",
+        connectionId: "retry-state-connection",
+        projectId: "project-1",
+      },
+      log: { debug() {}, warn() {}, info() {}, error() {} },
+    };
+
+    const first = await executor.execute(input);
+    const retryState = (first as { providerRetryState?: unknown }).providerRetryState as {
+      client?: Record<string, unknown>;
+    };
+    assert.ok(retryState, "initial execution must return provider retry state");
+
+    const second = await executor.execute({
+      ...input,
+      credentials: { ...input.credentials, accessToken: "refreshed-token" },
+      providerRetryState: retryState,
+    });
+    const secondRetryState = (
+      second as { providerRetryState?: { client?: Record<string, unknown> } }
+    ).providerRetryState;
+
+    assert.deepEqual(retryState.client, {
+      profile: "ide",
+      contractId: "antigravity-wire-ide-synthetic-v1",
+      observedVersion: null,
+      versionState: "unverified",
+      source: "provider-default",
+    });
+    assert.deepEqual(secondRetryState?.client, retryState.client);
+    assert.equal(requests.length, 2);
+    assert.deepEqual(
+      {
+        requestId: requests[0].requestId,
+        sessionId: (requests[0].request as Record<string, unknown>).sessionId,
+      },
+      {
+        requestId: requests[1].requestId,
+        sessionId: (requests[1].request as Record<string, unknown>).sessionId,
+      }
+    );
+    assert.equal((retryState as { client?: { profile?: string } }).client?.profile, "ide");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AntigravityExecutor snapshots the effective credits body for refresh re-entry", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, unknown>> = [];
+  let attempt = 0;
+  globalThis.fetch = async (_url, init) => {
+    requests.push(
+      JSON.parse(await new Response(init?.body as BodyInit).text()) as Record<string, unknown>
+    );
+    attempt++;
+    if (attempt === 1) {
+      return Response.json({ error: { message: "quota exhausted" } }, { status: 429 });
+    }
+    if (attempt === 2) {
+      return Response.json({ error: { message: "refresh required" } }, { status: 401 });
+    }
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}]}}\n\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  };
+
+  try {
+    const executor = new AntigravityExecutor();
+    const input = {
+      model: "antigravity/gemini-2.5-flash",
+      body: { request: { contents: [{ role: "user", parts: [{ text: "test" }] }] } },
+      stream: true,
+      credentials: {
+        accessToken: "test-access-token",
+        connectionId: "credits-retry-state-connection",
+        projectId: "project-1",
+      },
+      log: { debug() {}, warn() {}, info() {}, error() {} },
+    };
+
+    const first = await withEnv("ANTIGRAVITY_CREDITS", "retry", () => executor.execute(input));
+    const retryState = (first as { providerRetryState?: unknown }).providerRetryState as {
+      semanticBody?: Record<string, unknown>;
+    };
+    assert.deepEqual(retryState.semanticBody?.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+
+    await executor.execute({
+      ...input,
+      credentials: { ...input.credentials, accessToken: "refreshed-test-access-token" },
+      providerRetryState: retryState,
+    });
+
+    assert.equal(requests.length, 3);
+    assert.equal(requests[0].enabledCreditTypes, undefined);
+    assert.deepEqual(requests[1].enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+    assert.deepEqual(requests[2].enabledCreditTypes, ["GOOGLE_ONE_AI"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AntigravityExecutor retry state ignores caller mutations to semantic body", async () => {
+  const originalFetch = globalThis.fetch;
+  seedAntigravityIdeVersionCache("2026.4.17");
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(await new Response(init?.body as BodyInit).text()));
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}]}}\\n\\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  };
+
+  try {
+    const executor = new AntigravityExecutor();
+    const body = {
+      request: { contents: [{ role: "user", parts: [{ text: "original" }] }] },
+    };
+    const input = {
+      model: "antigravity/gemini-2.5-flash",
+      body,
+      stream: true,
+      credentials: {
+        accessToken: "retry-state-mutation-token",
+        connectionId: "retry-state-mutation-connection",
+        projectId: "project-1",
+      },
+      log: { debug() {}, warn() {}, info() {}, error() {} },
+    };
+
+    const first = await executor.execute(input);
+    const retryState = (first as { providerRetryState?: unknown }).providerRetryState as {
+      semanticBody?: Record<string, unknown>;
+    };
+    assert.ok(retryState?.semanticBody, "initial execution must return semantic retry state");
+
+    body.request.contents[0].parts[0].text = "caller mutation";
+    try {
+      const semanticRequest = retryState.semanticBody?.request as Record<string, unknown>;
+      const semanticContents = semanticRequest.contents as Array<Record<string, unknown>>;
+      const semanticParts = semanticContents[0].parts as Array<Record<string, unknown>>;
+      semanticParts[0].text = "retry-state mutation";
+    } catch {
+      // An immutable snapshot is an accepted implementation of this contract.
+    }
+
+    await executor.execute({
+      ...input,
+      providerRetryState: retryState,
+    });
+
+    assert.equal(
+      (
+        (requests[1].request as Record<string, unknown>).contents as Array<Record<string, unknown>>
+      )[0].parts &&
+        (
+          (
+            (requests[1].request as Record<string, unknown>).contents as Array<
+              Record<string, unknown>
+            >
+          )[0].parts as Array<Record<string, unknown>>
+        )[0].text,
+      "original"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("AntigravityExecutor.buildUrl always targets the streaming endpoint", () => {
   const executor = new AntigravityExecutor();
   assert.match(
@@ -102,6 +294,99 @@ test("Antigravity header scrub removes OmniRoute internal headers", () => {
   assert.equal(headers["X-OmniRoute-No-Cache"], undefined);
   assert.equal(headers["X-Forwarded-For"], undefined);
   assert.equal(headers["Accept-Encoding"], "gzip, deflate, br");
+});
+
+test("sendAntigravityRequest scrubs forbidden headers after serialization", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedHeaders = new Headers();
+  globalThis.fetch = async (_url, init) => {
+    capturedHeaders = new Headers(init?.headers);
+    return new Response("ok", { status: 200 });
+  };
+
+  try {
+    const result = await sendAntigravityRequest(
+      "antigravity",
+      "https://example.test/v1internal:streamGenerateContent?alt=sse",
+      "gemini-2.5-flash",
+      {
+        Authorization: "Bearer token",
+        "X-Forwarded-For": "127.0.0.1",
+        "X-Stainless-Lang": "js",
+        "Sec-Fetch-Site": "cross-site",
+        Referer: "https://example.test",
+        Priority: "u=1",
+        "X-OmniRoute-Source": "test",
+      },
+      { request: { contents: [] } },
+      { accessToken: "token", projectId: "project-1" },
+      true,
+      null,
+      { debug() {}, warn() {}, info() {}, error() {} },
+      0
+    );
+
+    assert.equal(result.response.status, 200);
+    for (const name of [
+      "x-forwarded-for",
+      "x-stainless-lang",
+      "sec-fetch-site",
+      "referer",
+      "priority",
+      "x-omniroute-source",
+    ]) {
+      assert.equal(capturedHeaders.get(name), null, `${name} must not reach upstream`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AntigravityExecutor.execute scrubs forbidden extra headers before fetch", async () => {
+  const executor = new AntigravityExecutor();
+  seedAntigravityIdeVersionCache("2.1.1");
+  const originalFetch = globalThis.fetch;
+  let capturedHeaders = new Headers();
+  globalThis.fetch = async (_url, init) => {
+    capturedHeaders = new Headers(init?.headers);
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  };
+
+  try {
+    const result = await executor.execute({
+      model: "antigravity/gemini-2.5-flash",
+      body: { request: { contents: [] } },
+      stream: false,
+      credentials: { accessToken: "token", projectId: "project-1" },
+      upstreamExtraHeaders: {
+        "X-Forwarded-For": "127.0.0.1",
+        "X-Stainless-Lang": "js",
+        "Sec-Fetch-Site": "cross-site",
+        Referer: "https://example.test",
+        Priority: "u=1",
+        "X-OmniRoute-Source": "test",
+      },
+      log: { debug() {}, warn() {}, info() {} },
+    });
+
+    assert.equal(result.response.status, 200);
+    for (const name of [
+      "x-forwarded-for",
+      "x-stainless-lang",
+      "sec-fetch-site",
+      "referer",
+      "priority",
+      "x-omniroute-source",
+    ]) {
+      assert.equal(capturedHeaders.get(name), null, `${name} must not reach upstream`);
+    }
+    assert.equal(capturedHeaders.get("user-agent"), antigravityIdeUserAgent("2.1.1"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("AntigravityExecutor.transformRequest normalizes model, project and contents", async () => {
@@ -625,7 +910,13 @@ test("AntigravityExecutor.refreshCredentials refreshes Google OAuth tokens", asy
       refreshToken: "new-refresh",
       expiresIn: 3600,
       projectId: "project-1",
-      providerSpecificData: undefined,
+      providerSpecificData: {
+        clientProfile: "ide",
+        clientContractId: "antigravity-wire-ide-synthetic-v1",
+        clientObservedVersion: null,
+        clientVersionState: "unverified",
+        clientContextSource: "provider-default",
+      },
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -638,7 +929,7 @@ test("AntigravityExecutor.refreshCredentials discovers projectId when stored val
   clearAntigravityProjectCache();
 
   let fetchCalls: string[] = [];
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (url, _init) => {
     const urlStr = String(url);
     fetchCalls.push(urlStr);
     // Token refresh endpoint
@@ -890,8 +1181,7 @@ test("AntigravityExecutor.execute bounds a persistent short-retry 429 instead of
 
 test("AntigravityExecutor.execute aborts during project bootstrap without starting runtime fetch", async () => {
   clearAntigravityProjectCache();
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2.1.1");
   const executor = new AntigravityExecutor();
   const originalFetch = globalThis.fetch;
   const controller = new AbortController();

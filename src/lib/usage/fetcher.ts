@@ -8,7 +8,8 @@ import {
 } from "@omniroute/open-sse/config/providerHeaderProfiles.ts";
 import {
   applyAntigravityClientProfileHeaders,
-  getAntigravityClientProfile,
+  getAntigravityClientContext,
+  type AntigravityClientContext,
 } from "@omniroute/open-sse/services/antigravityClientProfile.ts";
 import { getAntigravityContentHeaders } from "@omniroute/open-sse/services/antigravityHeaders.ts";
 import {
@@ -39,6 +40,7 @@ export async function getUsageForProvider(connection) {
     case "antigravity":
     case "agy":
       return await getAntigravityUsage(
+        provider,
         accessToken,
         providerSpecificData,
         connection.projectId,
@@ -61,7 +63,7 @@ export async function getUsageForProvider(connection) {
 /**
  * GitHub Copilot Usage
  */
-async function getGitHubUsage(accessToken, providerSpecificData) {
+async function getGitHubUsage(_accessToken, providerSpecificData) {
   try {
     // Use copilotToken for copilot_internal API, not GitHub OAuth accessToken
     const copilotToken = providerSpecificData?.copilotToken;
@@ -147,7 +149,8 @@ async function probeAntigravityCreditBalance(
   accessToken: string,
   accountId: string,
   projectId?: string | null,
-  providerSpecificData: Record<string, unknown> = {}
+  providerSpecificData: Record<string, unknown> = {},
+  context?: AntigravityClientContext
 ): Promise<number | null> {
   try {
     if (!projectId) return null; // Can't call streamGenerateContent without a projectId
@@ -178,7 +181,8 @@ async function probeAntigravityCreditBalance(
     applyAntigravityClientProfileHeaders(
       headers,
       { connectionId: accountId, projectId, providerSpecificData },
-      body
+      body,
+      context
     );
 
     const res = await fetch(url, {
@@ -235,13 +239,14 @@ async function probeAntigravityCreditBalance(
  * to fetch the balance proactively. `retry` mode never probes from the dashboard.
  */
 async function getAntigravityUsage(
+  provider: string,
   accessToken: string,
   providerSpecificData: Record<string, unknown> = {},
   projectId?: string | null,
   connectionId?: string | null
 ) {
   try {
-    const clientProfile = getAntigravityClientProfile({ providerSpecificData });
+    const clientContext = getAntigravityClientContext(provider, { providerSpecificData });
     // Use connectionId as the cache key — matches executor's credentials.connectionId
     const accountId: string = connectionId || "unknown";
 
@@ -256,7 +261,8 @@ async function getAntigravityUsage(
         accessToken,
         accountId,
         projectId,
-        providerSpecificData
+        providerSpecificData,
+        clientContext
       );
     }
 
@@ -268,7 +274,7 @@ async function getAntigravityUsage(
       try {
         res = await fetch(endpoint, {
           method: "POST",
-          headers: getAntigravityContentHeaders(clientProfile, accessToken),
+          headers: getAntigravityContentHeaders({ accessToken }, clientContext),
           body: JSON.stringify({}),
           signal: AbortSignal.timeout(15_000),
         });
@@ -374,13 +380,13 @@ async function getAntigravityUsage(
  * Claude Usage (legacy fallback)
  * Real Claude OAuth quota windows are fetched in @omniroute/open-sse/services/usage.ts.
  */
-async function getClaudeUsage(accessToken?: string) {
+async function getClaudeUsage(_accessToken?: string) {
   try {
     return {
       message:
         "Claude connected. Detailed quota windows are handled by the open-sse usage service.",
     };
-  } catch (error) {
+  } catch {
     return { message: "Unable to fetch Claude usage." };
   }
 }
@@ -390,7 +396,7 @@ async function getClaudeUsage(accessToken?: string) {
  * Note: Actual quota tracking is handled by open-sse/services/usage.ts
  * This fallback returns a message directing users to the dashboard.
  */
-async function getCodexUsage(accessToken, providerSpecificData: Record<string, any> = {}) {
+async function getCodexUsage(_accessToken, providerSpecificData: Record<string, any> = {}) {
   try {
     // Check if workspace is bound
     const workspaceId = providerSpecificData?.workspaceId;
@@ -400,7 +406,7 @@ async function getCodexUsage(accessToken, providerSpecificData: Record<string, a
       };
     }
     return { message: "Codex connected. Check OpenAI dashboard for usage." };
-  } catch (error) {
+  } catch {
     return { message: "Unable to fetch Codex usage." };
   }
 }
@@ -408,11 +414,11 @@ async function getCodexUsage(accessToken, providerSpecificData: Record<string, a
 /**
  * Qoder Usage
  */
-async function getQoderUsage(accessToken) {
+async function getQoderUsage(_accessToken) {
   try {
     // Qoder may have usage endpoint
     return { message: "Qoder connected. Usage tracked per request." };
-  } catch (error) {
+  } catch {
     return { message: "Unable to fetch Qoder usage." };
   }
 }

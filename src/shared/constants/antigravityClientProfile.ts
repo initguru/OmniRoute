@@ -2,6 +2,9 @@ export const ANTIGRAVITY_CLIENT_PROFILE_VALUES = ["ide", "cli"] as const;
 
 export type AntigravityClientProfile = (typeof ANTIGRAVITY_CLIENT_PROFILE_VALUES)[number];
 
+/** Canonical profile ID shared by the runtime compatibility contract and wire manifests. */
+export type AntigravityProfileId = AntigravityClientProfile;
+
 export const DEFAULT_ANTIGRAVITY_CLIENT_PROFILE: AntigravityClientProfile = "ide";
 
 export type AntigravityClientProfileSetting = AntigravityClientProfile;

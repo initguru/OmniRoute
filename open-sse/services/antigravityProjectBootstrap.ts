@@ -19,7 +19,11 @@ import {
   getAntigravityLoadCodeAssistMetadata,
 } from "./antigravityHeaders.ts";
 import { extractCodeAssistOnboardTierId } from "./codeAssistSubscription.ts";
-import type { AntigravityClientProfile } from "./antigravityClientProfile.ts";
+import {
+  getAntigravityClientContext,
+  type AntigravityClientContext,
+  type AntigravityClientProfile,
+} from "./antigravityClientProfile.ts";
 import {
   ANTIGRAVITY_BOOTSTRAP_BASE_URLS,
   getAntigravityOnboardUrls,
@@ -110,10 +114,17 @@ async function tryLoadCodeAssist(
   accessToken: string,
   fetchImpl: FetchLike,
   clientProfile: AntigravityClientProfile,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  context?: AntigravityClientContext
 ): Promise<LoadCodeAssistResult> {
   const urls = getAntigravityLoadCodeAssistUrls();
-  const headers = getAntigravityContentHeaders(clientProfile, accessToken);
+  const headers = getAntigravityContentHeaders(
+    { accessToken },
+    context ?? getAntigravityClientContext(clientProfile === "cli" ? "agy" : "antigravity", {
+      accessToken,
+      providerSpecificData: { clientProfile },
+    })
+  );
 
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
@@ -123,7 +134,7 @@ async function tryLoadCodeAssist(
       const response = await fetchImpl(url, {
         method: "POST",
         headers,
-        body: JSON.stringify({ metadata: getAntigravityLoadCodeAssistMetadata() }),
+        body: JSON.stringify({ metadata: getAntigravityLoadCodeAssistMetadata(context) }),
         signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
       });
 
@@ -203,13 +214,20 @@ async function tryOnboardUser(
   fetchImpl: FetchLike,
   clientProfile: AntigravityClientProfile,
   tierId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  context?: AntigravityClientContext
 ): Promise<AntigravityOnboardStatus> {
   const urls = getAntigravityOnboardUrls();
-  const headers = getAntigravityContentHeaders(clientProfile, accessToken);
+  const headers = getAntigravityContentHeaders(
+    { accessToken },
+    context ?? getAntigravityClientContext(clientProfile === "cli" ? "agy" : "antigravity", {
+      accessToken,
+      providerSpecificData: { clientProfile },
+    })
+  );
   const body = JSON.stringify({
     tier_id: tierId,
-    metadata: getAntigravityLoadCodeAssistMetadata(),
+    metadata: getAntigravityLoadCodeAssistMetadata(context),
   });
 
   for (const url of urls) {
@@ -328,9 +346,16 @@ export async function ensureAntigravityProjectAssigned(
   accessToken: string,
   fetchImpl: FetchLike = fetch,
   clientProfile: AntigravityClientProfile = "ide",
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  context?: AntigravityClientContext
 ): Promise<string | undefined> {
-  const cacheKey = getProjectCacheKey(accessToken, clientProfile);
+  const requestContext =
+    context ??
+    getAntigravityClientContext(clientProfile === "cli" ? "agy" : "antigravity", {
+      accessToken,
+      providerSpecificData: { clientProfile },
+    });
+  const cacheKey = getProjectCacheKey(accessToken, requestContext.profile);
   if (projectCache.has(cacheKey)) {
     const cached = projectCache.get(cacheKey)!;
     // Touch on read: delete+reinsert moves this entry to the end (LRU).
@@ -342,8 +367,9 @@ export async function ensureAntigravityProjectAssigned(
   const { projectId: initialProjectId, tierId } = await tryLoadCodeAssist(
     accessToken,
     fetchImpl,
-    clientProfile,
-    signal
+    requestContext.profile,
+    signal,
+    requestContext
   );
 
   let projectId = initialProjectId;
@@ -371,9 +397,10 @@ export async function ensureAntigravityProjectAssigned(
           const status = await tryOnboardUser(
             accessToken,
             fetchImpl,
-            clientProfile,
+            requestContext.profile,
             tierId,
-            signal
+            signal,
+            requestContext
           );
           if (status === "requires_manual_project") {
             markRequiresManualProject(cacheKey);
@@ -381,7 +408,13 @@ export async function ensureAntigravityProjectAssigned(
             return;
           }
           if (status === "onboarded") {
-            const retry = await tryLoadCodeAssist(accessToken, fetchImpl, clientProfile, signal);
+            const retry = await tryLoadCodeAssist(
+              accessToken,
+              fetchImpl,
+              requestContext.profile,
+              signal,
+              requestContext
+            );
             if (retry.projectId) {
               evictOldest(projectCache);
               projectCache.set(cacheKey, retry.projectId);
@@ -389,7 +422,7 @@ export async function ensureAntigravityProjectAssigned(
               return;
             }
           }
-        } catch (e) {
+        } catch {
           aborted = signal?.aborted === true;
           return;
         } finally {

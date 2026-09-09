@@ -15,6 +15,9 @@ import {
   seedAntigravityCliVersionCache,
   seedAntigravityIdeVersionCache,
 } from "../../open-sse/services/antigravityVersion.ts";
+import { createAntigravityClientContext } from "../../open-sse/config/antigravityClient.ts";
+import { getAntigravityClientContext } from "../../open-sse/services/antigravityClientProfile.ts";
+import { AntigravityExecutor } from "../../open-sse/executors/antigravity.ts";
 
 test.afterEach(() => {
   clearAntigravityVersionCaches();
@@ -45,6 +48,105 @@ test("User-Agent OS/arch token stays pinned to darwin/arm64 regardless of host (
   );
 });
 
+test("supplied provider-default null-version contexts use profile fallback identity", () => {
+  seedAntigravityCliVersionCache("9.9.9");
+  seedAntigravityIdeVersionCache("8.8.8");
+
+  const cliContext = createAntigravityClientContext("agy", undefined);
+  const ideContext = createAntigravityClientContext("antigravity", undefined);
+  const cliHeaders = new Headers(
+    getAntigravityContentHeaders({ accessToken: "cli-token" }, cliContext)
+  );
+  const ideHeaders = new Headers(
+    getAntigravityContentHeaders({ accessToken: "ide-token" }, ideContext)
+  );
+
+  assert.deepEqual(cliContext, {
+    profile: "cli",
+    contractId: "antigravity-wire-cli-synthetic-v1",
+    observedVersion: null,
+    versionState: "unverified",
+    source: "provider-default",
+  });
+  assert.deepEqual(ideContext, {
+    profile: "ide",
+    contractId: "antigravity-wire-ide-synthetic-v1",
+    observedVersion: null,
+    versionState: "unverified",
+    source: "provider-default",
+  });
+  assert.equal(cliHeaders.get("User-Agent"), antigravityCliUserAgent("1.1.5"));
+  assert.equal(ideHeaders.get("User-Agent"), antigravityIdeUserAgent("2.1.1"));
+});
+
+test("complete persisted null-version contexts ignore divergent global version caches", async () => {
+  seedAntigravityCliVersionCache("9.9.9");
+  seedAntigravityIdeVersionCache("8.8.8");
+
+  const cliCredentials = {
+    accessToken: "cli-token",
+    providerSpecificData: { clientProfile: "cli" },
+  };
+  const ideCredentials = {
+    accessToken: "ide-token",
+    providerSpecificData: { clientProfile: "ide" },
+  };
+  const cliContext = getAntigravityClientContext("agy", {
+    ...cliCredentials,
+    providerSpecificData: {
+      ...cliCredentials.providerSpecificData,
+      clientContractId: "antigravity-wire-cli-synthetic-v1",
+      clientObservedVersion: null,
+      clientVersionState: "unverified",
+      clientContextSource: "credential",
+    },
+  });
+  const ideContext = getAntigravityClientContext("antigravity", {
+    ...ideCredentials,
+    providerSpecificData: {
+      ...ideCredentials.providerSpecificData,
+      clientContractId: "antigravity-wire-ide-synthetic-v1",
+      clientObservedVersion: null,
+      clientVersionState: "unverified",
+      clientContextSource: "credential",
+    },
+  });
+
+  const cliContent = new Headers(getAntigravityContentHeaders(cliCredentials, cliContext));
+  const cliOAuth = getAntigravityOAuthUserAgent(cliContext);
+  const ideBootstrap = new Headers(getAntigravityIdeNodeHeaders("ide-token", ideContext));
+  const originalFetch = globalThis.fetch;
+  let refreshUserAgent = "";
+  globalThis.fetch = async (_input, init) => {
+    refreshUserAgent = new Headers(init?.headers).get("User-Agent") ?? "";
+    return Response.json({ access_token: "refreshed-token", expires_in: 3600 });
+  };
+
+  try {
+    await new AntigravityExecutor().refreshCredentials(
+      {
+        refreshToken: "refresh-token",
+        projectId: "project-1",
+        providerSpecificData: {
+          clientProfile: "cli",
+          clientContractId: cliContext.contractId,
+          clientObservedVersion: null,
+          clientVersionState: "unverified",
+          clientContextSource: "credential",
+        },
+      },
+      null
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(cliContent.get("User-Agent"), antigravityCliUserAgent("1.1.5"));
+  assert.equal(cliOAuth, antigravityCliUserAgent("1.1.5"));
+  assert.equal(refreshUserAgent, antigravityCliUserAgent("1.1.5"));
+  assert.equal(ideBootstrap.get("User-Agent"), antigravityIdeNodeUserAgent("2.1.1"));
+});
+
 test("IDE and CLI content headers use independent cached versions", () => {
   seedAntigravityIdeVersionCache("2.2.0");
   seedAntigravityCliVersionCache("1.2.0");
@@ -69,6 +171,17 @@ test("IDE and CLI content headers use independent cached versions", () => {
       assert.equal(headers.get(absent), null, `${absent} must be absent from content headers`);
     }
   }
+});
+
+test("credential header helpers reject unknown persisted profiles instead of defaulting to IDE", () => {
+  assert.throws(
+    () =>
+      getAntigravityContentHeaders({
+        accessToken: "token",
+        providerSpecificData: { clientProfile: "unexpected-profile" },
+      }),
+    /compatibility contract rejected profile/
+  );
 });
 
 test("IDE Node OAuth and onboarding headers use the captured Google Node identity", () => {

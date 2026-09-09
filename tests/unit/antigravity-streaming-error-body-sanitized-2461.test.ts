@@ -22,8 +22,8 @@ test.afterEach(() => {
 test("AntigravityExecutor.execute (stream=true) sanitizes a non-ok upstream body instead of piping raw bytes", async () => {
   const executor = new AntigravityExecutor();
   const originalFetch = globalThis.fetch;
-  seedAntigravityIdeVersionCache("2026.04.17-test");
-  seedAntigravityCliVersionCache("2026.04.17-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 
   // Simulate a gzip-compressed 403 body (magic bytes 0x1f 0x8b), the exact shape
   // reported upstream — reading it as text without decoding produces garbage.

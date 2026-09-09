@@ -20,6 +20,32 @@ describe("getUsageForProvider (antigravity in fetcher.ts)", () => {
     id: "test-conn",
   };
 
+  async function assertNoProfileUsageIdentity(provider: "antigravity" | "agy", expectedPrefix: string) {
+    const fetcherModule = await import("../../src/lib/usage/fetcher.ts");
+    const { getUsageForProvider } = fetcherModule;
+    const mockFetch = mock.method(global, "fetch", async (_input, init) => {
+      assert.match(new Headers(init?.headers).get("user-agent") ?? "", expectedPrefix);
+      return new Response(JSON.stringify({ models: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await getUsageForProvider({
+        ...connectionBase,
+        provider,
+        id: `no-profile-${provider}`,
+      });
+    } finally {
+      mockFetch.mock.restore();
+    }
+  }
+
+  it("uses provider defaults for no-profile usage identities", async () => {
+    await assertNoProfileUsageIdentity("agy", /^antigravity\/cli\//);
+    await assertNoProfileUsageIdentity("antigravity", /^antigravity\/ide\//);
+  });
+
   it("defaults to 0% remaining when remainingFraction is undefined", async () => {
     const fetcherModule = await import("../../src/lib/usage/fetcher.ts");
     const { getUsageForProvider } = fetcherModule;

@@ -23,8 +23,8 @@ test.beforeEach(async () => {
   await resetStorage();
   await settingsDb.updateSettings({ requestRetry: 0, maxRetryIntervalSec: 0 });
   clearAntigravityProjectCache();
-  seedAntigravityIdeVersionCache("2026.04.17-byop-rotation-test");
-  seedAntigravityCliVersionCache("2026.04.17-byop-rotation-test");
+  seedAntigravityIdeVersionCache("2026.4.17");
+  seedAntigravityCliVersionCache("2026.4.17");
 });
 
 test.afterEach(() => {
