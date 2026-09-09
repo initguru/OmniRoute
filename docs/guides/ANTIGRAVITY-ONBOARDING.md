@@ -105,7 +105,9 @@ Every antigravity/agy connection needs a Google Cloud Code `projectId`. Without 
 
 ### Method A: Automatic (Recommended)
 
-OmniRoute handles this automatically. When you add a new Google account via Dashboard OAuth:
+OmniRoute handles this automatically. When you add a new Google account via Dashboard OAuth, the bootstrap path is separate from fingerprint compatibility: it discovers or provisions the Cloud Code project and does not select a client profile or bypass upstream eligibility/quota controls.
+
+When you add a new Google account via Dashboard OAuth:
 
 1. OmniRoute refreshes the token
 2. Calls `loadCodeAssist` to discover the projectId
@@ -117,7 +119,7 @@ OmniRoute handles this automatically. When you add a new Google account via Dash
 
 ### Method B: Manual via agy CLI
 
-If automatic discovery fails (see Section 5 for when this happens):
+If automatic discovery fails (see Section 5 for when this happens), `agy login` is a project-registration/bootstrap workaround. It does not change the Antigravity request fingerprint, select the downstream `cli`/`ide` profile, bypass geo or eligibility checks, or grant quota/subscription access:
 
 ```bash
 # Install agy CLI (if not already)
@@ -130,7 +132,7 @@ agy login
 # This triggers Cloud Code registration and assigns a projectId
 ```
 
-After `agy login` succeeds, refresh the token in OmniRoute Dashboard. The projectId will be discovered automatically.
+After `agy login` succeeds, refresh the token in OmniRoute Dashboard. The projectId will be discovered automatically. This only bootstraps Cloud Code project discovery; runtime profile selection and request identity remain governed by the persisted credential profile and the runtime compatibility contract.
 
 ### How to verify
 

@@ -120,6 +120,8 @@ Each entry has these fields (defined in `src/shared/schemas/cliCatalog.ts`):
 | `configType`                                    | `"env" \| "custom" \| "guide" \| "custom-builder" \| "mitm"` | Configuration mechanism                                |
 | `id`, `name`, `color`, `description`, `docsUrl` | standard                                                     | Core display fields                                    |
 
+Antigravity's catalog capability is intentionally narrow: its entry is `configType: "mitm"` with `baseUrlSupport: "none"`. The MITM card is a bootstrap/transport surface, not a profile selector. Native outbound profile compatibility is provided by the runtime `cli` and `ide` profiles in `open-sse/config/antigravityClient.ts` and `open-sse/services/antigravityHeaders.ts`; the catalog must not invent additional profile IDs or a custom base URL.
+
 Entries with `baseUrlSupport: "none"` are **not shown** in the dashboard pages — they are registered in the MITM backlog for plan 11 (see `_tasks/features-v3.8.6/refactorpages/_orchestration/_plan11-mitm-backlog.md`).
 
 ### Capability tiers (cataloged × detectable × configurable × launchable)
@@ -176,6 +178,10 @@ All tools that appear in `/dashboard/cli-code`. Those with `baseUrlSupport: none
 | hermes       | Hermes                  | Nous Research       | none           | guide          | false        |
 | kiro         | Kiro AI                 | Amazon              | none           | mitm           | false        |
 | custom       | Custom CLI              | —                   | full           | custom-builder | false        |
+
+The Antigravity MITM entry supports the native Cloud Code compatibility surfaces; it does not accept a caller-selected profile. The downstream executor resolves the persisted credential profile (`cli` or `ide`) and uses the runtime base URLs and request paths declared by `open-sse/config/antigravityUpstream.ts`. Configure the MITM flow through the documented local management endpoints, not by supplying an arbitrary upstream base URL.
+
+The runtime compatibility event contract names these supported Antigravity surfaces: `oauth`, `bootstrap`, `content`, `usage`, `credits`, `image`, and `mitm`. They cover credential exchange, project discovery/onboarding, model content execution, quota/usage reads, bounded credit retry, image generation, and the local MITM boundary. The surface names are stable capability labels; they do not authorize profile changes or geo, quota, subscription, eligibility, or anti-abuse bypasses.
 
 Tools with `baseUrlSupport: "partial"` show a badge "⚠ Base URL parcial" in the dashboard card.
 ---
