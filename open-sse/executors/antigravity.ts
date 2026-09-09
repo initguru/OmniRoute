@@ -7,6 +7,11 @@ import {
   type ProviderCredentials,
 } from "./base.ts";
 import { PROVIDERS, OAUTH_ENDPOINTS, HTTP_STATUS, FETCH_TIMEOUT_MS } from "../config/constants.ts";
+import {
+  buildAntigravityCompatibilityEvent,
+  logAntigravityCompatibilityEvent,
+} from "../services/antigravityCompatibilityDiagnostics.ts";
+import { classifyAntigravityCompatibilityError } from "../services/errorClassifier.ts";
 import { scrubProxyAndFingerprintHeaders } from "../services/antigravityHeaderScrub.ts";
 import {
   getAntigravityContentHeaders,
@@ -25,10 +30,7 @@ import { persistCreditBalance, getAllPersistedCreditBalances } from "@/lib/db/cr
 import { setConnectionRateLimitUntil } from "@/lib/db/providers";
 import { markAntigravityModelQuotaExhausted } from "../services/antigravityFamilyCooldown.ts";
 import { getMitmAlias } from "@/lib/db/models";
-import {
-  MAX_ANTIGRAVITY_OUTPUT_TOKENS,
-  resolveAntigravityOutputCap,
-} from "./antigravityOutputCap.ts";
+import { resolveAntigravityOutputCap } from "./antigravityOutputCap.ts";
 export { MAX_ANTIGRAVITY_OUTPUT_TOKENS } from "./antigravityOutputCap.ts";
 import {
   ensureAntigravityProjectAssigned,
@@ -73,14 +75,14 @@ import {
   handleAntigravityFallback400,
 } from "./antigravity/proFallbackChain.ts";
 import {
+  getAntigravityClientContext,
+  assertAntigravityClientContextCompatible,
+  getAntigravityClientContextMetadata,
   getAntigravityClientProfile,
-  resolveAntigravityClientVersion,
+  type AntigravityClientContext,
 } from "../services/antigravityClientProfile.ts";
-import {
-  generateAntigravityRequestId,
-  getAntigravityEnvelopeUserAgent,
-  getAntigravitySessionId,
-} from "../services/antigravityIdentity.ts";
+import { buildAntigravityEnvelope } from "./antigravity/requestContract.ts";
+import { getAntigravitySessionId } from "../services/antigravityIdentity.ts";
 
 const MAX_RETRY_AFTER_MS = 60_000;
 const LONG_RETRY_THRESHOLD_MS = 60_000;
@@ -157,23 +159,13 @@ type AntigravityChunkContent = Record<string, unknown> & {
 type AntigravityRequestEnvelope = Record<string, unknown> & {
   project: string;
   model?: string;
+  userPromptId?: string;
   userAgent: "antigravity";
   requestType: "agent" | "image_gen";
   requestId: string;
   request: Record<string, unknown>;
   enabledCreditTypes?: string[];
 };
-
-const ANTIGRAVITY_ENVELOPE_FIELDS = new Set([
-  "project",
-  "requestId",
-  "request",
-  "model",
-  "userPromptId",
-  "userAgent",
-  "requestType",
-  "enabledCreditTypes",
-]);
 
 const MAX_CREDIT_BALANCE_ENTRIES = 50;
 const CREDIT_BALANCE_TTL_MS = 5 * 60 * 1000;
@@ -368,6 +360,30 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** Clone translated input before applying Antigravity-only guards and defaults. */
+function cloneAntigravityRequestValue<T>(value: T): T {
+  if (!value || typeof value !== "object") return value;
+
+  const sourceRecord = asRecord(value);
+  const toolNameMap = sourceRecord?._toolNameMap instanceof Map ? sourceRecord._toolNameMap : null;
+  let clone: unknown;
+  try {
+    clone = structuredClone(value);
+  } catch {
+    clone = JSON.parse(JSON.stringify(value));
+  }
+
+  if (toolNameMap && asRecord(clone)) {
+    Object.defineProperty(clone, "_toolNameMap", {
+      value: toolNameMap,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  return clone as T;
+}
+
 /**
  * Known competing-agent identity sentences that Antigravity's server-side
  * filter flags, answering with a 429 RESOURCE_EXHAUSTED (port of
@@ -519,6 +535,112 @@ export const __test_stripTrailingAntigravityAssistantTurn = stripTrailingAntigra
 
 type AntigravityCreditsRetryState = { attempted: boolean };
 
+export type AntigravityProviderRetryState = {
+  provider: "antigravity";
+  client: AntigravityClientContext;
+  semanticBody: Record<string, unknown>;
+};
+
+function attachAntigravityToolNameMap(
+  body: Record<string, unknown>,
+  source: unknown
+): Record<string, unknown> {
+  const sourceMap =
+    source &&
+    typeof source === "object" &&
+    (source as Record<string, unknown>)._toolNameMap instanceof Map
+      ? (source as Record<string, unknown>)._toolNameMap
+      : null;
+  if (sourceMap) {
+    Object.defineProperty(body, "_toolNameMap", {
+      value: sourceMap,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  return body;
+}
+
+function freezeAntigravityRequestValue<T>(value: T): T {
+  const seen = new WeakSet<object>();
+  const freeze = (current: unknown): void => {
+    if (!current || typeof current !== "object") return;
+    const objectValue = current as object;
+    if (seen.has(objectValue)) return;
+    seen.add(objectValue);
+    if (current instanceof Map || current instanceof Set) {
+      Object.freeze(current);
+      return;
+    }
+    for (const key of Reflect.ownKeys(objectValue)) {
+      const descriptor = Object.getOwnPropertyDescriptor(objectValue, key);
+      if (descriptor && "value" in descriptor) freeze(descriptor.value);
+    }
+    Object.freeze(current);
+  };
+  freeze(value);
+  return value;
+}
+
+function cloneAntigravityRetryBody(semanticBody: Record<string, unknown>): Record<string, unknown> {
+  const clone = cloneAntigravityRequestValue(semanticBody);
+  const cloneRecord = asRecord(clone);
+  const toolNameMap = cloneRecord?._toolNameMap;
+  if (toolNameMap instanceof Map && cloneRecord) {
+    Object.defineProperty(cloneRecord, "_toolNameMap", {
+      value: new Map(toolNameMap),
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  return cloneRecord ?? {};
+}
+
+function createAntigravityProviderRetryState(
+  client: AntigravityClientContext,
+  semanticBody: Record<string, unknown>
+): AntigravityProviderRetryState {
+  const snapshot = cloneAntigravityRequestValue(semanticBody);
+  const snapshotMap =
+    asRecord(snapshot)?._toolNameMap instanceof Map
+      ? new Map(asRecord(snapshot)?._toolNameMap as Map<string, string>)
+      : null;
+  if (snapshotMap && asRecord(snapshot)) {
+    Object.defineProperty(snapshot, "_toolNameMap", {
+      value: snapshotMap,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  return {
+    provider: "antigravity",
+    client: Object.freeze({ ...client }),
+    semanticBody: freezeAntigravityRequestValue(snapshot),
+  };
+}
+
+function isAntigravityProviderRetryState(value: unknown): value is AntigravityProviderRetryState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Partial<AntigravityProviderRetryState>;
+  if (state.provider !== "antigravity") return false;
+  if (
+    !state.semanticBody ||
+    typeof state.semanticBody !== "object" ||
+    Array.isArray(state.semanticBody)
+  ) {
+    return false;
+  }
+  try {
+    assertAntigravityClientContextCompatible(state.client as AntigravityClientContext);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Base per-url-index attempt context, before the request has been sent. */
 type AntigravityAttemptContext = {
   url: string;
@@ -537,6 +659,7 @@ type AntigravityAttemptContext = {
   urlIndex: number;
   retryAttemptsByUrl: Record<number, number>;
   fallbackCount: number;
+  clientContext: AntigravityClientContext;
 };
 
 /** Context threaded through the 429/503 handling helpers — adds the sent response. */
@@ -590,14 +713,30 @@ export class AntigravityExecutor extends BaseExecutor {
     return `${baseUrl}/v1internal:streamGenerateContent?alt=sse`;
   }
 
-  buildHeaders(credentials: AntigravityCredentials, _stream = true): Record<string, string> {
-    const clientProfile = getAntigravityClientProfile(credentials);
+  private buildContextHeaders(
+    credentials: AntigravityCredentials,
+    context: AntigravityClientContext
+  ): Record<string, string> {
     const raw = {
-      ...getAntigravityContentHeaders(clientProfile, credentials.accessToken),
+      ...getAntigravityContentHeaders(credentials, context),
       Accept: "text/event-stream",
     };
     // Scrub proxy/fingerprint headers that reveal non-native traffic
     return scrubProxyAndFingerprintHeaders(raw);
+  }
+
+  buildHeaders(
+    credentials: AntigravityCredentials,
+    _stream = true,
+    _clientHeaders?: Record<string, string> | null,
+    _model?: string,
+    _health?: Record<string, unknown>,
+    _body?: unknown
+  ): Record<string, string> {
+    return this.buildContextHeaders(
+      credentials,
+      getAntigravityClientContext(this.provider, credentials)
+    );
   }
 
   async transformRequest(
@@ -606,7 +745,8 @@ export class AntigravityExecutor extends BaseExecutor {
     _stream: boolean,
     credentials: AntigravityCredentials,
     modelIdOverride?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    context?: AntigravityClientContext
   ): Promise<AntigravityRequestEnvelope | Response> {
     // Project ID resolution: prefer OAuth-stored projectId over incoming body.project
     // to avoid stale/wrong client-side values causing 404/403 from Cloud Code endpoints.
@@ -616,7 +756,7 @@ export class AntigravityExecutor extends BaseExecutor {
       const trimmedValue = value.trim();
       return trimmedValue ? trimmedValue : null;
     };
-    const bodyRecord = asRecord(body) ?? {};
+    const bodyRecord = cloneAntigravityRequestValue(asRecord(body) ?? {});
     const bodyProjectId = normalizeProjectId(bodyRecord.project);
     const credentialsProjectId = normalizeProjectId(credentials?.projectId);
     const providerSpecificProjectId = normalizeProjectId(
@@ -642,8 +782,9 @@ export class AntigravityExecutor extends BaseExecutor {
       const discovered = await ensureAntigravityProjectAssigned(
         credentials.accessToken,
         fetch,
-        getAntigravityClientProfile(credentials),
-        signal
+        context?.profile ?? getAntigravityClientProfile(credentials),
+        signal,
+        context
       );
       if (discovered && discovered !== ANTIGRAVITY_REQUIRES_MANUAL_PROJECT) {
         projectId = discovered;
@@ -739,9 +880,11 @@ export class AntigravityExecutor extends BaseExecutor {
     // untouched; the strip itself never empties `contents` (see the guard above).
     const isGemini = isAntigravityGeminiChatModel(upstreamModel);
     const baseBody = bodyRecord;
+    const toolNameMap = baseBody._toolNameMap instanceof Map ? baseBody._toolNameMap : null;
     const normalizedBody = shouldStripCloudCodeThinking(this.provider, upstreamModel)
       ? stripCloudCodeThinkingConfig(baseBody)
       : baseBody;
+    attachAntigravityToolNameMap(normalizedBody, toolNameMap);
     const normalizedRequest = asRecord(normalizedBody.request);
     const rawContents = Array.isArray(normalizedRequest?.contents)
       ? normalizedRequest.contents
@@ -838,39 +981,25 @@ export class AntigravityExecutor extends BaseExecutor {
       enable_thinking: _enableThinking,
       thinking_budget: _thinkingBudget,
       enabledCreditTypes: _enabledCreditTypes,
-      _toolNameMap: toolNameMap,
-      ...passthroughFields
+      ..._passthroughFields
     } = normalizedBody;
 
     const requestType = _requestType === "image_gen" ? "image_gen" : "agent";
-    const envelope: AntigravityRequestEnvelope = {
+    const envelopeBody = {
+      ...normalizedBody,
       project: projectId,
-      requestId: generateAntigravityRequestId(),
       request: transformedRequest,
       model: upstreamModel,
-      userAgent: getAntigravityEnvelopeUserAgent(credentials),
       requestType,
+      userPromptId: _userPromptId,
+      _toolNameMap: toolNameMap,
     };
-
-    for (const [key, value] of Object.entries(passthroughFields)) {
-      if (ANTIGRAVITY_ENVELOPE_FIELDS.has(key)) {
-        envelope[key] = value;
-      }
-    }
-
-    if (typeof _userPromptId === "string" && _userPromptId.length > 0) {
-      envelope.userPromptId = _userPromptId;
-    }
-
-    if (toolNameMap instanceof Map) {
-      Object.defineProperty(envelope, "_toolNameMap", {
-        value: toolNameMap,
-        configurable: true,
-        enumerable: false,
-        writable: true,
-      });
-    }
-
+    const envelope = buildAntigravityEnvelope(envelopeBody, {
+      client: context ?? getAntigravityClientContext(this.provider, credentials),
+      requestType,
+      upstreamModel,
+      allowBodyProjectOverride,
+    }) as AntigravityRequestEnvelope;
     return envelope;
   }
 
@@ -879,6 +1008,10 @@ export class AntigravityExecutor extends BaseExecutor {
     log?: ExecutorLog | null
   ): Promise<AntigravityCredentials | null> {
     if (!credentials.refreshToken) return null;
+
+    const clientContext = getAntigravityClientContext(this.provider, credentials);
+    const refreshStartedAt = Date.now();
+    const refreshLog = toSafeAntigravityLog(log);
 
     try {
       const bodyParams: Record<string, string> = {
@@ -895,12 +1028,29 @@ export class AntigravityExecutor extends BaseExecutor {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
-          "User-Agent": getAntigravityOAuthUserAgent(getAntigravityClientProfile(credentials)),
+          "User-Agent": getAntigravityOAuthUserAgent(clientContext),
         },
         body: new URLSearchParams(bodyParams),
       });
 
       if (!response.ok) {
+        const refreshErrorClass = classifyAntigravityCompatibilityError(
+          response.status,
+          null,
+          this.provider
+        );
+        logAntigravityCompatibilityEvent(
+          refreshLog,
+          buildAntigravityCompatibilityEvent({
+            context: clientContext,
+            surface: "oauth",
+            requestType: null,
+            attempt: 1,
+            errorClass: refreshErrorClass,
+            retryDecision: "refresh_retry",
+            durationMs: Date.now() - refreshStartedAt,
+          })
+        );
         // Detect unrecoverable token (invalid_grant = revoked / expired refresh token)
         try {
           const errorBody = (await response.json()) as Record<string, unknown>;
@@ -915,6 +1065,18 @@ export class AntigravityExecutor extends BaseExecutor {
       }
 
       const tokens = (await response.json()) as Record<string, unknown>;
+      logAntigravityCompatibilityEvent(
+        refreshLog,
+        buildAntigravityCompatibilityEvent({
+          context: clientContext,
+          surface: "oauth",
+          requestType: null,
+          attempt: 1,
+          errorClass: null,
+          retryDecision: "refresh_retry",
+          durationMs: Date.now() - refreshStartedAt,
+        })
+      );
       log?.info?.("TOKEN", "Antigravity refreshed");
 
       const newAccessToken =
@@ -931,8 +1093,9 @@ export class AntigravityExecutor extends BaseExecutor {
           const discovered = await ensureAntigravityProjectAssigned(
             newAccessToken,
             fetch,
-            getAntigravityClientProfile(credentials),
-            AbortSignal.timeout(8_000)
+            clientContext.profile,
+            AbortSignal.timeout(8_000),
+            clientContext
           );
           if (discovered) {
             projectId = discovered;
@@ -962,9 +1125,24 @@ export class AntigravityExecutor extends BaseExecutor {
         projectId,
         // Preserve providerSpecificData so a projectId stored there survives the refresh
         // (the onCredentialsRefreshed DB write) instead of being dropped → 422 (#2480).
-        providerSpecificData: credentials.providerSpecificData,
+        providerSpecificData: {
+          ...credentials.providerSpecificData,
+          ...getAntigravityClientContextMetadata(clientContext),
+        },
       };
     } catch (error) {
+      logAntigravityCompatibilityEvent(
+        refreshLog,
+        buildAntigravityCompatibilityEvent({
+          context: clientContext,
+          surface: "oauth",
+          requestType: null,
+          attempt: 1,
+          errorClass: "transport",
+          retryDecision: "refresh_retry",
+          durationMs: Date.now() - refreshStartedAt,
+        })
+      );
       const message = error instanceof Error ? error.message : String(error);
       log?.error?.("TOKEN", `Antigravity refresh error: ${message}`);
       return null;
@@ -1199,7 +1377,13 @@ export class AntigravityExecutor extends BaseExecutor {
    * exactly the same single call as before (zero extra upstream requests).
    */
   async execute(input: ExecuteInput) {
-    await resolveAntigravityClientVersion(getAntigravityClientProfile(input.credentials));
+    const retryState = isAntigravityProviderRetryState(input.providerRetryState)
+      ? input.providerRetryState
+      : null;
+    if (retryState) {
+      return this.executeOnce(input, undefined, retryState.client, retryState);
+    }
+    const clientContext = getAntigravityClientContext(this.provider, input.credentials);
 
     // Look up the chain by the NORMALLY-resolved upstream id (honours MITM/static aliases).
     // If a MITM alias remapped the id away from a known Pro tier, no chain applies → fast path.
@@ -1208,7 +1392,7 @@ export class AntigravityExecutor extends BaseExecutor {
 
     if (chain.length <= 1) {
       // No fallback chain (flash, claude, plain pro, unknown) → single attempt, unchanged.
-      return this.executeOnce(input);
+      return this.executeOnce(input, undefined, clientContext);
     }
 
     let firstResult: Awaited<ReturnType<AntigravityExecutor["executeOnce"]>> | null = null;
@@ -1216,7 +1400,7 @@ export class AntigravityExecutor extends BaseExecutor {
       const candidate = chain[i];
       let result: Awaited<ReturnType<AntigravityExecutor["executeOnce"]>>;
       try {
-        result = await this.executeOnce(input, candidate);
+        result = await this.executeOnce(input, candidate, clientContext);
       } catch (error) {
         const outcome = handleAntigravityFallbackChainError(
           input,
@@ -1258,7 +1442,7 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     // Unreachable (loop always returns), but keeps the type checker happy.
-    return firstResult ?? this.executeOnce(input);
+    return firstResult ?? this.executeOnce(input, undefined, clientContext);
   }
 
   /**
@@ -1270,9 +1454,11 @@ export class AntigravityExecutor extends BaseExecutor {
    */
   private async executeOnce(
     { model, body, stream, credentials, signal, log, upstreamExtraHeaders }: ExecuteInput,
-    modelIdOverride?: string
+    modelIdOverride?: string,
+    clientContext?: AntigravityClientContext,
+    retryState?: AntigravityProviderRetryState | null
   ) {
-    await resolveAntigravityClientVersion(getAntigravityClientProfile(credentials));
+    const requestContext = clientContext ?? getAntigravityClientContext(this.provider, credentials);
     const fallbackCount = this.getFallbackCount();
     const l = toSafeAntigravityLog(log);
     let lastError = null;
@@ -1297,25 +1483,50 @@ export class AntigravityExecutor extends BaseExecutor {
     const useCreditsFirst = shouldUseCreditsFirst(credentials?.accessToken || "", creditsMode);
     const creditsRetryState: AntigravityCreditsRetryState = { attempted: false };
 
+    // Freeze the translated semantic request once for this model candidate. URL
+    // fallbacks and bounded retries must only rebuild transport headers; they
+    // must not re-run translation or regenerate the semantic body.
+    const transformed = retryState
+      ? retryState.semanticBody
+      : await this.transformRequest(
+          model,
+          body,
+          upstreamStream,
+          credentials,
+          modelIdOverride,
+          signal ?? undefined,
+          requestContext
+        );
+
+    if (transformed instanceof Response) {
+      const url = this.buildUrl(model, upstreamStream, 0);
+      const responseHeaders = this.buildContextHeaders(credentials, requestContext);
+      mergeUpstreamExtraHeaders(responseHeaders, upstreamExtraHeaders);
+      return {
+        response: transformed,
+        url,
+        headers: scrubProxyAndFingerprintHeaders(responseHeaders),
+        transformedBody: body,
+        providerRetryState: createAntigravityProviderRetryState(
+          requestContext,
+          body as Record<string, unknown>
+        ),
+      };
+    }
+
+    const transformedBody = retryState
+      ? attachAntigravityToolNameMap(
+          cloneAntigravityRetryBody(retryState.semanticBody),
+          retryState.semanticBody
+        )
+      : finalizeAntigravityRequestBody(transformed, useCreditsFirst, l);
+    attachAntigravityToolNameMap(transformedBody, retryState?.semanticBody ?? transformed);
+
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
       const url = this.buildUrl(model, upstreamStream, urlIndex);
-      const headers = this.buildHeaders(credentials, upstreamStream);
+      const headers = this.buildContextHeaders(credentials, requestContext);
       mergeUpstreamExtraHeaders(headers, upstreamExtraHeaders);
-      const transformed = await this.transformRequest(
-        model,
-        body,
-        upstreamStream,
-        credentials,
-        modelIdOverride,
-        signal ?? undefined
-      );
-
-      if (transformed instanceof Response) {
-        return { response: transformed, url, headers, transformedBody: body };
-      }
-
-      const transformedBody = finalizeAntigravityRequestBody(transformed, useCreditsFirst, l);
-
+      const sanitizedHeaders = scrubProxyAndFingerprintHeaders(headers);
       // Initialize retry counter for this URL
       if (!retryAttemptsByUrl[urlIndex]) {
         retryAttemptsByUrl[urlIndex] = 0;
@@ -1325,7 +1536,7 @@ export class AntigravityExecutor extends BaseExecutor {
         const outcome = await this.runAntigravityAttempt({
           url,
           model,
-          headers,
+          headers: sanitizedHeaders,
           transformedBody,
           credentials,
           stream,
@@ -1337,9 +1548,18 @@ export class AntigravityExecutor extends BaseExecutor {
           urlIndex,
           retryAttemptsByUrl,
           fallbackCount,
+          clientContext: requestContext,
         });
 
-        if (outcome.action === "return") return outcome.result;
+        if (outcome.action === "return") {
+          return {
+            ...outcome.result,
+            providerRetryState: createAntigravityProviderRetryState(
+              requestContext,
+              asRecord(outcome.result.transformedBody) ?? transformedBody
+            ),
+          };
+        }
         if (outcome.lastStatus !== undefined) lastStatus = outcome.lastStatus;
         if (outcome.sameUrl) urlIndex--;
         continue;
@@ -1385,7 +1605,7 @@ export class AntigravityExecutor extends BaseExecutor {
       accountId,
       urlIndex,
       retryAttemptsByUrl,
-      fallbackCount,
+      clientContext,
     } = ctx;
 
     const { response, finalHeaders } = await sendAntigravityRequest(
@@ -1398,7 +1618,8 @@ export class AntigravityExecutor extends BaseExecutor {
       stream,
       signal,
       log,
-      retryAttemptsByUrl[urlIndex]
+      retryAttemptsByUrl[urlIndex],
+      clientContext
     );
 
     let retryMs: number | null = null;
@@ -1604,6 +1825,7 @@ export class AntigravityExecutor extends BaseExecutor {
       accountId,
       creditsMode,
       creditsRetryState,
+      clientContext,
     } = ctx;
 
     try {
@@ -1649,7 +1871,8 @@ export class AntigravityExecutor extends BaseExecutor {
           signal,
           log,
           accountId,
-          updateAntigravityRemainingCredits
+          updateAntigravityRemainingCredits,
+          clientContext
         );
         if (creditsResult) return { kind: "return", result: creditsResult };
         if (retryMs) markConnectionQuotaExhausted(accountId, retryMs, ctx.model);

@@ -140,6 +140,7 @@ const ingestShim = require("./_internal/ingest.cjs");
 const forwardShim = require("./_internal/forwardTarget.cjs");
 const aliasConfigShim = require("./_internal/aliasConfig.cjs");
 const standaloneRoutingShim = require("./_internal/standaloneRouting.cjs");
+const routingContextShim = require("./_internal/agentBridgeRoutingContext.cjs");
 
 // Inspector capture (D4 fallback). The standalone proxy intercepts AgentBridge
 // traffic inline (no MitmHandlerBase / agentBridgeHook), so it posts captured
@@ -255,7 +256,11 @@ function loadLegacySslOptions() {
 // `tproxy/dynamicCert.ts` — see that file's header for why it's duplicated
 // rather than imported). Resolved once during async bootstrap below.
 async function loadRootCaSslOptions() {
-  const { loadOrCreateMitmCa, issueLeafCert, DynamicCertStore } = require("./_internal/rootCaShim.cjs");
+  const {
+    loadOrCreateMitmCa,
+    issueLeafCert,
+    DynamicCertStore,
+  } = require("./_internal/rootCaShim.cjs");
   const ca = await loadOrCreateMitmCa(certDir);
   const certStore = new DynamicCertStore({ key: ca.key, cert: ca.cert });
   const defaultHost = [...TARGET_HOSTS][0];
@@ -477,7 +482,9 @@ function captureToInspector(o) {
       agentId: o.agentId,
       sourceModel: o.sourceModel != null ? o.sourceModel : null,
       mappedModel: o.mappedModel,
-      requestHeaders: headersToObject(o.req.headers),
+      requestHeaders: headersToObject(
+        routingContextShim.stripAgentBridgeRoutingContextProofFromHeaders(o.req.headers)
+      ),
       requestBody:
         o.bodyBuffer && o.bodyBuffer.length > 0
           ? o.bodyBuffer.toString("utf8").slice(0, INGEST_MAX_BODY)
@@ -541,6 +548,17 @@ async function intercept(req, res, bodyBuffer, override, sourceModel) {
     });
     vlog(1, `[MITM] → forward ${forward.format} ${forward.url}`);
 
+    const routingContextAssertion =
+      agentId === "antigravity"
+        ? routingContextShim.createChildAgentBridgeRoutingContextAssertionFromEnvironment({
+            agent: agentId,
+            path: new URL(forward.url).pathname,
+          })
+        : null;
+    if (agentId === "antigravity" && !routingContextAssertion) {
+      throw new Error("AgentBridge routing context is unavailable");
+    }
+
     upstreamStartedAt = Date.now();
     const response = await fetch(forward.url, {
       method: "POST",
@@ -549,6 +567,9 @@ async function intercept(req, res, bodyBuffer, override, sourceModel) {
         Authorization: `Bearer ${API_KEY}`,
         "x-omniroute-source": "agent-bridge",
         "x-omniroute-agent": agentId,
+        ...(routingContextAssertion
+          ? { "x-omniroute-agent-bridge-proof": routingContextAssertion }
+          : {}),
       },
       body: JSON.stringify(body),
     });
@@ -705,7 +726,9 @@ async function startMitmServer() {
     vlog(
       1,
       `[MITM] INTERCEPTED ${agentId} ${model} → ${mappedOverride.model || model}` +
-        (mappedOverride.reasoningEffort ? ` (reasoningEffort=${mappedOverride.reasoningEffort})` : "")
+        (mappedOverride.reasoningEffort
+          ? ` (reasoningEffort=${mappedOverride.reasoningEffort})`
+          : "")
     );
     return intercept(req, res, bodyBuffer, mappedOverride, model);
   });

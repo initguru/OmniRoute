@@ -1,10 +1,55 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  AntigravityHandler,
-  convertGeminiToOpenAI,
-} from "../../src/mitm/handlers/antigravity.ts";
+import { Readable } from "node:stream";
+import test from "node:test";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { AntigravityHandler, convertGeminiToOpenAI } from "../../src/mitm/handlers/antigravity.ts";
 import { runHandler } from "./_mitmHandlerHarness.ts";
+
+async function runHandlerWithUpstreamChunks(
+  chunks: Buffer[],
+  body: Record<string, unknown> = {
+    contents: [{ role: "user", parts: [{ text: "chunked" }] }],
+  }
+): Promise<Buffer[]> {
+  const originalFetch = globalThis.fetch;
+  const responseChunks: Buffer[] = [];
+  let headersSent = false;
+  const response = {
+    get headersSent() {
+      return headersSent;
+    },
+    writeHead() {
+      headersSent = true;
+    },
+    write(chunk: Buffer | string) {
+      responseChunks.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(chunk));
+      return true;
+    },
+    end(chunk?: Buffer | string) {
+      if (chunk)
+        responseChunks.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(chunk));
+    },
+  } as unknown as ServerResponse;
+  const request = {
+    method: "POST",
+    url: "/v1internal:streamGenerateContent",
+    headers: { host: "api.example.com" },
+  } as unknown as IncomingMessage;
+  const stream = Readable.toWeb(Readable.from(chunks)) as unknown as ReadableStream<Uint8Array>;
+  globalThis.fetch = (async () => new Response(stream, { status: 200 })) as typeof fetch;
+
+  try {
+    await new AntigravityHandler().intercept(
+      request,
+      response,
+      Buffer.from(JSON.stringify(body)),
+      "ag-claude-opus-4-6-thinking"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  return responseChunks;
+}
 
 test("antigravity handler — forwards to OmniRoute and pipes SSE", async () => {
   const r = await runHandler(
@@ -19,12 +64,10 @@ test("antigravity handler — forwards to OmniRoute and pipes SSE", async () => 
 });
 
 test("antigravity handler — propagates upstream failure as 500", async () => {
-  const r = await runHandler(
-    new AntigravityHandler(),
-    { model: "gpt-4o" },
-    "claude-3.5-sonnet",
-    { upstreamStatus: 500, upstreamBody: "boom" }
-  );
+  const r = await runHandler(new AntigravityHandler(), { model: "gpt-4o" }, "claude-3.5-sonnet", {
+    upstreamStatus: 500,
+    upstreamBody: "boom",
+  });
   assert.equal(r.status, 500);
   const body = r.responseChunks.join("");
   // Error must NOT include raw stack trace (Hard Rule #12 sanitization).
@@ -157,6 +200,98 @@ test("antigravity handler — forwards a cloudcode envelope request with real me
   // Envelope wrapper fields must not leak into the OpenAI body.
   assert.equal(forwarded.request, undefined);
   assert.equal(forwarded.project, undefined);
+});
+
+test("antigravity handler — ignores inbound identity override headers", async () => {
+  const r = await runHandler(
+    new AntigravityHandler(),
+    {
+      clientProfile: "cli",
+      userAgent: "forged-cli/99.0",
+      request: {
+        clientProfile: "cli",
+        contents: [{ role: "user", parts: [{ text: "profile probe" }] }],
+      },
+    },
+    "ag-claude-opus-4-6-thinking",
+    {
+      headers: {
+        "User-Agent": "forged-cli/99.0",
+        "x-client-profile": "cli",
+        clientProfile: "cli",
+        "x-omniroute-agent": "cli",
+        "x-omniroute-source": "omniroute",
+        "X-OmniRoute-Connection": "forced-connection",
+      },
+      upstreamBody: "data: profile-safe\\n\\n",
+      url: "/v1internal:streamGenerateContent",
+    }
+  );
+
+  assert.equal(r.fetchHeaders["user-agent"], undefined);
+  assert.equal(r.fetchHeaders["x-client-profile"], undefined);
+  assert.equal(r.fetchHeaders.clientprofile, undefined);
+  assert.equal(r.fetchHeaders["x-omniroute-agent"], "antigravity");
+  assert.equal(r.fetchHeaders["x-omniroute-source"], "agent-bridge");
+  assert.equal(r.fetchHeaders["x-omniroute-connection"], undefined);
+  const forwarded = JSON.parse(r.fetchBody);
+  assert.equal(forwarded.clientProfile, undefined);
+  assert.equal(forwarded.userAgent, undefined);
+  assert.equal(forwarded.request, undefined);
+});
+
+test("antigravity handler — restores tool names in streamed responses", async () => {
+  const r = await runHandler(
+    new AntigravityHandler(),
+    { contents: [{ role: "user", parts: [{ text: "run a command" }] }] },
+    "ag-claude-opus-4-6-thinking",
+    {
+      upstreamBody:
+        'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"bash","arguments":"{}"}}]}}]}\n\n',
+      url: "/v1internal:streamGenerateContent",
+    }
+  );
+
+  assert.match(r.responseChunks.join(""), /"name":"Bash"/);
+  assert.doesNotMatch(r.responseChunks.join(""), /"name":"bash"/);
+});
+
+test("antigravity handler — restores tool names when marker spans response chunks", async () => {
+  const chunks = await runHandlerWithUpstreamChunks([
+    Buffer.from('data: {"name":"ba'),
+    Buffer.from('sh"}\n\n'),
+  ]);
+  const output = Buffer.concat(chunks).toString();
+  assert.match(output, /"name":"Bash"/);
+  assert.doesNotMatch(output, /"name":"bash"/);
+});
+
+test("antigravity handler — preserves split UTF-8 bytes", async () => {
+  const chunks = await runHandlerWithUpstreamChunks([Buffer.from([0xc3]), Buffer.from([0xa9])]);
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([0xc3, 0xa9]));
+});
+
+test("antigravity handler — preserves arbitrary response bytes", async () => {
+  const chunks = await runHandlerWithUpstreamChunks([Buffer.from([0x00, 0xff, 0x80])]);
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([0x00, 0xff, 0x80]));
+});
+
+test("antigravity handler — restores tool names when marker prefix spans chunks", async () => {
+  const chunks = await runHandlerWithUpstreamChunks([
+    Buffer.from('data: {"na'),
+    Buffer.from('me":"ba'),
+    Buffer.from('sh"}\n\n'),
+  ]);
+  assert.match(Buffer.concat(chunks).toString(), /"name":"Bash"/);
+});
+
+test("antigravity handler — flushes oversized non-marker candidates", async () => {
+  const oversized = Buffer.from(`data: {"${"x".repeat(512)}`);
+  const chunks = await runHandlerWithUpstreamChunks([oversized, Buffer.from('"name":"bash"}')]);
+  assert.deepEqual(
+    Buffer.concat(chunks),
+    Buffer.concat([oversized, Buffer.from('"name":"Bash"}')])
+  );
 });
 
 test("antigravity handler — non-streaming URL yields stream:false", async () => {

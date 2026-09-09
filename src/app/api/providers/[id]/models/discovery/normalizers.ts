@@ -5,7 +5,10 @@ import {
   getAntigravityFetchAvailableModelsUrls,
 } from "@omniroute/open-sse/config/antigravityUpstream.ts";
 import { getAntigravityContentHeaders } from "@omniroute/open-sse/services/antigravityHeaders.ts";
-import { resolveAntigravityClientVersion } from "@omniroute/open-sse/services/antigravityClientProfile.ts";
+import {
+  getAntigravityClientContext,
+  resolveAntigravityClientVersion,
+} from "@omniroute/open-sse/services/antigravityClientProfile.ts";
 import {
   getClientVisibleAntigravityModelName,
   isDiscoverableAntigravityModelId,
@@ -15,7 +18,6 @@ import {
   getClientVisibleAgyModelName,
   isDiscoverableAgyModelId,
 } from "@omniroute/open-sse/config/agyModels.ts";
-import { normalizeAntigravityClientProfile } from "@/shared/constants/antigravityClientProfile";
 import { ensureAntigravityProjectAssigned } from "@omniroute/open-sse/services/antigravityProjectBootstrap.ts";
 import { persistDiscoveredAntigravityProjectId } from "@omniroute/open-sse/services/antigravityProjectPersist.ts";
 import { asRecord, toNonEmptyString } from "./helpers";
@@ -157,14 +159,23 @@ export async function fetchAntigravityDiscoveryModelsCached(
 ): Promise<
   Array<{ id: string; name: string; inputTokenLimit?: number; outputTokenLimit?: number }>
 > {
-  const profile = normalizeAntigravityClientProfile(asRecord(providerSpecificData).clientProfile);
+  const clientContext = getAntigravityClientContext(provider, {
+    providerSpecificData: asRecord(providerSpecificData),
+  });
+  const { profile } = clientContext;
   const cacheKey = `${provider}:${connectionId}:${accessToken.substring(0, 16)}:${profile}`;
   const inflight = antigravityDiscoveryInflight.get(cacheKey);
   if (inflight) return inflight;
 
   const promise = (async () => {
     await resolveAntigravityClientVersion(profile);
-    const discovered = await ensureAntigravityProjectAssigned(accessToken, fetch, profile);
+    const discovered = await ensureAntigravityProjectAssigned(
+      accessToken,
+      fetch,
+      profile,
+      undefined,
+      clientContext
+    );
     if (discovered) {
       // #8491: persist the recovered id so it survives the next token refresh
       // or process restart instead of being silently rediscovered every time.

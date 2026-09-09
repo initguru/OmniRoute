@@ -18,7 +18,10 @@ import {
   mergeLocalCatalogModels,
   getAzureOpenAIApiVersion,
 } from "../../src/app/api/providers/[id]/models/discovery/helpers.ts";
-import { normalizeOpenAiLikeModelsResponse } from "../../src/app/api/providers/[id]/models/discovery/normalizers.ts";
+import {
+  fetchAntigravityDiscoveryModelsCached,
+  normalizeOpenAiLikeModelsResponse,
+} from "../../src/app/api/providers/[id]/models/discovery/normalizers.ts";
 import {
   NAMED_OPENAI_STYLE_PROVIDERS,
   isNamedOpenAIStyleProvider,
@@ -113,6 +116,48 @@ test("normalizers.normalizeOpenAiLikeModelsResponse drops entries without an id"
     out.map((m) => m.id),
     ["ok"]
   );
+});
+
+test("Antigravity discovery rejects an unknown persisted client profile before network access", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("network should not be reached");
+  };
+  try {
+    await assert.rejects(
+      fetchAntigravityDiscoveryModelsCached(
+        "token",
+        "connection-unknown-profile",
+        null,
+        { clientProfile: "unexpected-profile" },
+        "agy"
+      ),
+      /compatibility contract rejected profile/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Antigravity discovery rejects a non-string persisted client profile before network access", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("network should not be reached");
+  };
+  try {
+    await assert.rejects(
+      fetchAntigravityDiscoveryModelsCached(
+        "token",
+        "connection-non-string-profile",
+        null,
+        { clientProfile: 42 },
+        "antigravity"
+      ),
+      /compatibility contract rejected profile/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // ── providerSets leaf ────────────────────────────────────────────────────────

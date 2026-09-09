@@ -24,14 +24,15 @@ type VersionParser = (payload: unknown) => string | null;
 const ideState: ProductVersionState = { cache: null, inFlight: null };
 const cliState: ProductVersionState = { cache: null, inFlight: null };
 
-function normalizeVersion(value: unknown): string | null {
+export function normalizeAntigravityVersion(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim().replace(/^v/i, "");
-  const match = trimmed.match(/^(\d+\.\d+\.\d+)\b/);
-  return match ? match[1] : null;
+  if (!/^\d+\.\d+\.\d+$/.test(trimmed)) return null;
+  if (trimmed.split(".").some((part) => part.length > 1 && part.startsWith("0"))) return null;
+  return trimmed;
 }
 
-function compareSemver(a: string, b: string): number {
+export function compareAntigravityVersions(a: string, b: string): number {
   const aParts = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
   const bParts = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
   for (let i = 0; i < 3; i += 1) {
@@ -42,10 +43,10 @@ function compareSemver(a: string, b: string): number {
 
 function pickNewestVersion(...versions: unknown[]): string | null {
   return versions
-    .map((version) => normalizeVersion(version))
+    .map((version) => normalizeAntigravityVersion(version))
     .filter((version): version is string => !!version)
     .reduce<string | null>(
-      (best, version) => (!best || compareSemver(version, best) > 0 ? version : best),
+      (best, version) => (!best || compareAntigravityVersions(version, best) > 0 ? version : best),
       null
     );
 }
@@ -81,7 +82,7 @@ function parseIdeReleaseFeed(payload: unknown): string | null {
 function parseCliRelease(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const release = payload as { name?: unknown; tag_name?: unknown };
-  return normalizeVersion(release.tag_name ?? release.name);
+  return normalizeAntigravityVersion(release.tag_name ?? release.name);
 }
 
 async function resolveProductVersion(
@@ -128,7 +129,7 @@ async function resolveProductVersion(
 }
 
 function seedVersionCache(state: ProductVersionState, version: string, fetchedAt: number): void {
-  const normalized = normalizeVersion(version);
+  const normalized = normalizeAntigravityVersion(version);
   if (!normalized) {
     throw new TypeError(`Invalid Antigravity version: ${version}`);
   }

@@ -6,7 +6,6 @@
 // (file-size cap), mirroring the existing antigravity/streamingPassthrough.ts and
 // antigravity/sseCollect.ts submodule pattern.
 import { mergeAbortSignals, type ExecutorLog } from "../base.ts";
-import { applyFingerprint, isCliCompatEnabled } from "../../config/cliFingerprints.ts";
 import { buildAntigravityUpstreamError } from "../antigravityUpstreamError.ts";
 import { maybeTriggerReactiveModelSync } from "@/lib/providerModels/reactiveModelSync.ts";
 import {
@@ -20,6 +19,7 @@ import {
   applyAntigravityClientProfileHeaders,
   removeHeaderCaseInsensitive,
 } from "../../services/antigravityClientProfile.ts";
+import { serializeAntigravityRequest } from "./requestContract.ts";
 import * as prl from "../../utils/providerRequestLogging.ts";
 import {
   createCreditsExtractionTransform as createCreditsExtractionTransformImpl,
@@ -27,6 +27,13 @@ import {
   type SsePassthroughResult,
 } from "./streamingPassthrough.ts";
 import type { AntigravityCredentials } from "../antigravity.ts";
+import {
+  buildAntigravityCompatibilityEvent,
+  logAntigravityCompatibilityEvent,
+} from "../../services/antigravityCompatibilityDiagnostics.ts";
+import { classifyAntigravityCompatibilityError } from "../../services/errorClassifier.ts";
+import { sanitizeErrorMessage } from "../../utils/error.ts";
+import type { AntigravityClientContext } from "../../config/antigravityClient.ts";
 
 const LONG_RETRY_THRESHOLD_MS = 60_000;
 const CREDITS_EXHAUSTED_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours
@@ -91,7 +98,8 @@ class AntigravityPreResponseTimeoutError extends Error {
   status = HTTP_STATUS.GATEWAY_TIMEOUT;
 
   constructor(timeoutMs: number, url: string) {
-    super(`Antigravity upstream did not return response headers within ${timeoutMs}ms: ${url}`);
+    void url;
+    super(`Antigravity upstream did not return response headers within ${timeoutMs}ms`);
     this.name = "TimeoutError";
   }
 }
@@ -211,24 +219,6 @@ function getChunkedOrFixedBody(bodyStr: string, stream: boolean): BodyInit {
   return bodyStr;
 }
 
-function cloneAntigravityRequestBody(body: unknown): unknown {
-  if (!body || typeof body !== "object") {
-    return body;
-  }
-
-  let clone: unknown;
-  try {
-    clone = structuredClone(body);
-  } catch {
-    clone = JSON.parse(JSON.stringify(body));
-  }
-
-  if (clone && typeof clone === "object") {
-    delete (clone as Record<string, unknown>)._toolNameMap;
-  }
-  return clone;
-}
-
 function getToolNameMap(body: Record<string, unknown>): Map<string, string> | null {
   return body._toolNameMap instanceof Map ? body._toolNameMap : null;
 }
@@ -248,22 +238,81 @@ function attachToolNameMap(
   return body;
 }
 
-function serializeAntigravityRequest(
-  provider: string,
-  headers: Record<string, string>,
-  body: unknown
-): { headers: Record<string, string>; bodyString: string } {
-  const serializedBody = cloneAntigravityRequestBody(body);
-
-  if (!isCliCompatEnabled(provider)) {
-    return { headers, bodyString: JSON.stringify(serializedBody) };
-  }
-  return applyFingerprint(provider, { ...headers }, serializedBody);
-}
-
 function getRequestTargetModel(body: Record<string, unknown>): string {
   const target = body.model;
   return typeof target === "string" && target.length > 0 ? target : "unknown";
+}
+
+const COMPATIBILITY_BODY_MAX_BYTES = 4 * 1024;
+const COMPATIBILITY_BODY_TIMEOUT_MS = 250;
+
+async function readCompatibilityResponseBody(response: Response): Promise<string | null> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    reader = response.clone().body?.getReader();
+  } catch {
+    return null;
+  }
+  if (!reader) return "";
+
+  const deadline = Date.now() + COMPATIBILITY_BODY_TIMEOUT_MS;
+  const decoder = new TextDecoder();
+  let bodyText = "";
+  let bytesRead = 0;
+  let shouldCancel = false;
+
+  try {
+    while (bytesRead < COMPATIBILITY_BODY_MAX_BYTES) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        shouldCancel = true;
+        return null;
+      }
+
+      const chunk = await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          settled = true;
+          shouldCancel = true;
+          reject(new Error("compatibility response body read timed out"));
+        }, remainingMs);
+        reader.read().then(
+          (result) => {
+            if (settled) return;
+            clearTimeout(timer);
+            resolve(result);
+          },
+          (error: unknown) => {
+            if (settled) return;
+            clearTimeout(timer);
+            reject(error);
+          }
+        );
+      });
+
+      if (chunk.done) break;
+      const value = chunk.value;
+      const bytesToRead = Math.min(value.byteLength, COMPATIBILITY_BODY_MAX_BYTES - bytesRead);
+      if (bytesToRead > 0) {
+        bodyText += decoder.decode(value.subarray(0, bytesToRead), { stream: true });
+        bytesRead += bytesToRead;
+      }
+      if (bytesToRead < value.byteLength) {
+        shouldCancel = true;
+        break;
+      }
+    }
+
+    bodyText += decoder.decode();
+    return sanitizeErrorMessage(bodyText);
+  } catch {
+    return null;
+  } finally {
+    if (shouldCancel || bytesRead >= COMPATIBILITY_BODY_MAX_BYTES) {
+      void reader.cancel().catch(() => {});
+    }
+    reader.releaseLock();
+  }
 }
 
 /** Sanitize unsupported schema metadata, then apply credits-first injection for one attempt. */
@@ -286,32 +335,39 @@ export function finalizeAntigravityRequestBody(
   return transformedBody;
 }
 
-/** Debug-only dump of outgoing headers (mask Authorization) and envelope shape. */
+/** Debug-only dump of allowlisted request shape; never log header/body values. */
 function dumpAntigravityRequestDebug(
   finalHeaders: Record<string, string>,
   transformedBody: Record<string, unknown>,
   clientProfile: unknown,
   log: SafeAntigravityLog
 ): void {
-  const safeHeaders = { ...finalHeaders };
-  if (safeHeaders["Authorization"]) safeHeaders["Authorization"] = "Bearer ***";
-  log.debug("AG_REQUEST_HEADERS", JSON.stringify(safeHeaders));
+  log.debug(
+    "AG_REQUEST_HEADERS",
+    JSON.stringify({
+      names: Object.keys(finalHeaders)
+        .map((name) => name.toLowerCase())
+        .sort(),
+    })
+  );
 
   const envelope = transformedBody as Record<string, unknown>;
   const requestInner = envelope.request as Record<string, unknown> | undefined;
+  const profile =
+    clientProfile && typeof clientProfile === "object"
+      ? (clientProfile as { profile?: unknown }).profile
+      : null;
   log.debug(
     "AG_REQUEST_ENVELOPE",
     JSON.stringify({
-      fieldOrder: Object.keys(envelope),
-      project: envelope.project,
-      requestId: envelope.requestId,
-      model: envelope.model,
-      userAgent: envelope.userAgent,
-      requestType: envelope.requestType,
-      enabledCreditTypes: envelope.enabledCreditTypes,
-      clientProfile,
-      sessionId: requestInner?.sessionId,
-      generationConfig: requestInner?.generationConfig,
+      fieldNames: Object.keys(envelope).sort(),
+      requestFieldNames: requestInner ? Object.keys(requestInner).sort() : [],
+      requestType:
+        envelope.requestType === "image_gen" || envelope.requestType === "agent"
+          ? envelope.requestType
+          : null,
+      hasEnabledCreditTypes: Array.isArray(envelope.enabledCreditTypes),
+      profile: profile === "cli" || profile === "ide" ? profile : null,
     })
   );
 }
@@ -333,19 +389,35 @@ export async function sendAntigravityRequest(
   stream: boolean,
   signal: AbortSignal | null | undefined,
   log: SafeAntigravityLog,
-  retryAttempt: number
+  retryAttempt: number,
+  context?: AntigravityClientContext
 ): Promise<{ response: Response; finalHeaders: Record<string, string> }> {
-  const serializedRequest = serializeAntigravityRequest(provider, headers, transformedBody);
-  let finalHeaders = serializedRequest.headers;
+  const startedAt = Date.now();
+  const resolvedContext = context ?? {
+    profile: "ide",
+    contractId: "antigravity-wire-ide-synthetic-v1",
+    observedVersion: null,
+    versionState: "unverified" as const,
+    source: "provider-default" as const,
+  };
+  const identityHeaders = { ...headers };
   const clientProfile = applyAntigravityClientProfileHeaders(
-    finalHeaders,
+    identityHeaders,
     credentials,
-    transformedBody
+    transformedBody,
+    resolvedContext
   );
+  const serializedRequest = serializeAntigravityRequest(
+    provider,
+    identityHeaders,
+    transformedBody,
+    clientProfile
+  );
+  let finalHeaders = serializedRequest.headers;
 
   log.debug(
     "TELEMETRY",
-    `[Antigravity] Execute - URL: ${url}, Model: ${model}, Target: ${getRequestTargetModel(transformedBody)}, RetryAttempt: ${retryAttempt}`
+    `[Antigravity] Execute - Target family: ${getRequestTargetModel(transformedBody).split("-")[0]}, RetryAttempt: ${retryAttempt}`
   );
 
   // Dump outgoing headers (mask Authorization) and envelope shape for debugging.
@@ -356,33 +428,78 @@ export async function sendAntigravityRequest(
   }
 
   await prl.captureCurrentProviderBody(url, finalHeaders, serializedRequest.bodyString, log);
-  let response = await fetchAntigravityWithReadinessTimeout(url, {
-    method: "POST",
-    headers: finalHeaders,
-    body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-    ...(stream ? { duplex: "half" } : {}),
-    signal,
-  });
-
-  if (response.status === HTTP_STATUS.FORBIDDEN && finalHeaders["x-goog-user-project"]) {
-    const retryHeaders = { ...finalHeaders };
-    removeHeaderCaseInsensitive(retryHeaders, "x-goog-user-project");
-    log.debug("RETRY", "403 with x-goog-user-project, retrying once without it");
-    await prl.captureCurrentProviderBody(url, retryHeaders, serializedRequest.bodyString, log);
+  let response: Response;
+  let finalRetryDecision: "none" | "bounded_retry" | "project_header_retry" =
+    retryAttempt > 0 ? "bounded_retry" : "none";
+  let finalAttempt = Math.max(1, retryAttempt + 1);
+  try {
     response = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
-      headers: retryHeaders,
+      headers: finalHeaders,
       body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
       ...(stream ? { duplex: "half" } : {}),
       signal,
     });
-    finalHeaders = retryHeaders;
+
+    if (response.status === HTTP_STATUS.FORBIDDEN && finalHeaders["x-goog-user-project"]) {
+      const retryHeaders = { ...finalHeaders };
+      removeHeaderCaseInsensitive(retryHeaders, "x-goog-user-project");
+      log.debug("RETRY", "403 with x-goog-user-project, retrying once without it");
+      const projectHeaderBody = await readCompatibilityResponseBody(response);
+      logAntigravityCompatibilityEvent(
+        log,
+        buildAntigravityCompatibilityEvent({
+          context: resolvedContext,
+          surface: "content",
+          requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+          attempt: finalAttempt,
+          errorClass: classifyAntigravityCompatibilityError(
+            response.status,
+            projectHeaderBody,
+            provider
+          ),
+          retryDecision: "project_header_retry",
+          bodyShape: transformedBody,
+          headerNames: Object.keys(finalHeaders),
+          durationMs: Date.now() - startedAt,
+        })
+      );
+      await prl.captureCurrentProviderBody(url, retryHeaders, serializedRequest.bodyString, log);
+      finalHeaders = retryHeaders;
+      finalRetryDecision = "project_header_retry";
+      finalAttempt += 1;
+      response = await fetchAntigravityWithReadinessTimeout(url, {
+        method: "POST",
+        headers: retryHeaders,
+        body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
+        ...(stream ? { duplex: "half" } : {}),
+        signal,
+      });
+    }
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw signal?.reason ?? error;
+    logAntigravityCompatibilityEvent(
+      log,
+      buildAntigravityCompatibilityEvent({
+        context: resolvedContext,
+        provider,
+        surface: "content",
+        requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+        attempt: finalAttempt,
+        errorClass: "transport",
+        retryDecision: finalRetryDecision,
+        bodyShape: transformedBody,
+        headerNames: Object.keys(finalHeaders),
+        durationMs: Date.now() - startedAt,
+      })
+    );
+    throw error;
   }
 
   if (!response.ok) {
     log.warn(
       "TELEMETRY",
-      `[Antigravity] Error Response - URL: ${url}, Status: ${response.status}, Model: ${model}`
+      `[Antigravity] Error Response - Status: ${response.status}, Model: ${model}`
     );
     if (response.status === HTTP_STATUS.NOT_FOUND) {
       // The backend may have shipped/renamed models the synced catalog does not
@@ -396,6 +513,25 @@ export async function sendAntigravityRequest(
       }
     }
   }
+
+  const responseBody = response.ok ? "" : await readCompatibilityResponseBody(response);
+  logAntigravityCompatibilityEvent(
+    log,
+    buildAntigravityCompatibilityEvent({
+      context: resolvedContext,
+      provider,
+      surface: "content",
+      requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+      attempt: finalAttempt,
+      errorClass: response.ok
+        ? null
+        : classifyAntigravityCompatibilityError(response.status, responseBody, provider),
+      retryDecision: finalRetryDecision,
+      bodyShape: transformedBody,
+      headerNames: Object.keys(finalHeaders),
+      durationMs: Date.now() - startedAt,
+    })
+  );
 
   return { response, finalHeaders };
 }
@@ -416,32 +552,65 @@ export async function tryCreditsRetry(
   signal: AbortSignal | null | undefined,
   log: SafeAntigravityLog,
   accountId: string,
-  onCreditsUpdate: OnAntigravityCreditsUpdate
+  onCreditsUpdate: OnAntigravityCreditsUpdate,
+  context?: AntigravityClientContext
 ): Promise<SsePassthroughResult | null> {
   log.info("AG_CREDITS", "Retrying with Google One AI credits");
+  const creditsStartedAt = Date.now();
   const creditsBody = attachToolNameMap(
     injectCreditsField(transformedBody),
     getToolNameMap(transformedBody)
   );
-  const serializedCreditsRequest = serializeAntigravityRequest(provider, headers, creditsBody);
-  const finalCreditsHeaders = serializedCreditsRequest.headers;
-  applyAntigravityClientProfileHeaders(finalCreditsHeaders, credentials, creditsBody);
+  const creditsHeaders = { ...headers };
+  const resolvedContext = applyAntigravityClientProfileHeaders(
+    creditsHeaders,
+    credentials,
+    creditsBody,
+    context
+  );
+  const serializedCreditsRequest = serializeAntigravityRequest(
+    provider,
+    creditsHeaders,
+    creditsBody,
+    resolvedContext
+  );
+  const scrubbedCreditsHeaders = serializedCreditsRequest.headers;
   try {
     await prl.captureCurrentProviderBody(
       url,
-      finalCreditsHeaders,
+      scrubbedCreditsHeaders,
       serializedCreditsRequest.bodyString,
       log
     );
     const creditsResp = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
-      headers: finalCreditsHeaders,
+      headers: scrubbedCreditsHeaders,
       body: getChunkedOrFixedBody(serializedCreditsRequest.bodyString, stream),
       ...(stream ? { duplex: "half" } : {}),
       signal,
     });
     if (creditsResp.ok || creditsResp.status !== HTTP_STATUS.RATE_LIMITED) {
       log.info("AG_CREDITS", `Credits retry succeeded: ${creditsResp.status}`);
+      const creditsBodyText = creditsResp.ok
+        ? ""
+        : await readCompatibilityResponseBody(creditsResp);
+      logAntigravityCompatibilityEvent(
+        log,
+        buildAntigravityCompatibilityEvent({
+          context: resolvedContext,
+          provider,
+          surface: "credits",
+          requestType: creditsBody.requestType === "image_gen" ? "image_gen" : "agent",
+          attempt: 1,
+          errorClass: creditsResp.ok
+            ? null
+            : classifyAntigravityCompatibilityError(creditsResp.status, creditsBodyText, provider),
+          retryDecision: "credits_retry",
+          bodyShape: creditsBody,
+          headerNames: Object.keys(scrubbedCreditsHeaders),
+          durationMs: Date.now() - creditsStartedAt,
+        })
+      );
       if (!stream && creditsResp.body) {
         // Raw SSE pass-through + credits extraction (see
         // streamingPassthrough.ts); 499s early if the client
@@ -452,7 +621,7 @@ export async function tryCreditsRetry(
           accountId,
           onCreditsUpdate,
           url,
-          finalCreditsHeaders,
+          scrubbedCreditsHeaders,
           creditsBody,
           signal
         );
@@ -460,7 +629,7 @@ export async function tryCreditsRetry(
       return {
         response: creditsResp,
         url,
-        headers: finalCreditsHeaders,
+        headers: scrubbedCreditsHeaders,
         transformedBody: creditsBody,
       };
     }
@@ -468,6 +637,21 @@ export async function tryCreditsRetry(
     // Credit retry also 429'd
     handleCreditsFailure(credentials?.accessToken || "");
     log.warn("AG_CREDITS", "Credits retry also 429'd");
+    logAntigravityCompatibilityEvent(
+      log,
+      buildAntigravityCompatibilityEvent({
+        context: resolvedContext,
+        provider,
+        surface: "credits",
+        requestType: creditsBody.requestType === "image_gen" ? "image_gen" : "agent",
+        attempt: 1,
+        errorClass: "quota_rate_limit",
+        retryDecision: "credits_retry",
+        bodyShape: creditsBody,
+        headerNames: Object.keys(scrubbedCreditsHeaders),
+        durationMs: Date.now() - creditsStartedAt,
+      })
+    );
 
     // Also mark in our legacy exhaustion map to avoid retrying other routes
     markCreditsExhausted(accountId);
@@ -477,7 +661,22 @@ export async function tryCreditsRetry(
       throw signal?.reason ?? creditsErr;
     }
     handleCreditsFailure(credentials?.accessToken || "");
-    log.warn("AG_CREDITS", `Credits retry failed: ${creditsErr}`);
+    log.warn("AG_CREDITS", "Credits retry failed");
+    logAntigravityCompatibilityEvent(
+      log,
+      buildAntigravityCompatibilityEvent({
+        context: resolvedContext,
+        provider,
+        surface: "credits",
+        requestType: creditsBody.requestType === "image_gen" ? "image_gen" : "agent",
+        attempt: 1,
+        errorClass: "transport",
+        retryDecision: "credits_retry",
+        bodyShape: creditsBody,
+        headerNames: Object.keys(scrubbedCreditsHeaders),
+        durationMs: Date.now() - creditsStartedAt,
+      })
+    );
     return null;
   }
 }

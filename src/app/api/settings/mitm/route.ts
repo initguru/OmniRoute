@@ -10,6 +10,10 @@ import { resolveApiKey } from "@/shared/services/apiKeyResolver";
 import { resolveMitmDataDir } from "@/mitm/dataDir";
 import { KIRO_MITM_PROFILE } from "@/mitm/targets/kiro";
 import { ANTIGRAVITY_MITM_PROFILE } from "@/mitm/targets/antigravity";
+import {
+  getAgentBridgeAntigravityConnection,
+  setAgentBridgeAntigravityConnection,
+} from "@/lib/db/agentBridgeState";
 
 type MitmTargetRoute = {
   id: string;
@@ -45,6 +49,7 @@ const updateMitmSchema = z.object({
   keyId: z.string().optional(),
   sudoPassword: z.string().optional(),
   port: z.coerce.number().int().min(1).max(65535).optional(),
+  antigravityConnectionId: z.string().trim().min(1).max(255).optional(),
 });
 
 const regenerateSchema = z.object({
@@ -147,6 +152,7 @@ async function buildMitmResponse() {
   const status = await getMitmStatus();
   const config = readConfig();
   const stats = readStats();
+  const antigravityConnectionId = await getAgentBridgeAntigravityConnection("antigravity");
 
   return {
     running: status.running,
@@ -156,6 +162,7 @@ async function buildMitmResponse() {
     hasCachedPassword: !!getCachedPassword(),
     port: config.port,
     targets: config.targets,
+    antigravityConnectionId,
     stats,
   };
 }
@@ -208,6 +215,10 @@ export async function PUT(request: Request) {
       config.port = DEFAULT_PORT;
       config.targets = defaultTargets(config.port);
       writeConfig();
+    }
+
+    if (parsed.data.antigravityConnectionId !== undefined) {
+      await setAgentBridgeAntigravityConnection("antigravity", parsed.data.antigravityConnectionId);
     }
 
     if (typeof parsed.data.enabled === "boolean") {

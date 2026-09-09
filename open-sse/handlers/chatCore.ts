@@ -3228,6 +3228,7 @@ export async function handleChatCore({
                 streamController.signal
               );
               const res = normalizeExecutorResult(rawExecutorResult);
+              providerRetryState = res.providerRetryState;
               trace("post_executor", { status: res?.response?.status });
 
               if (
@@ -3659,6 +3660,7 @@ export async function handleChatCore({
   let providerHeaders;
   let finalBody;
   let claudePromptCacheLogMeta = null;
+  let providerRetryState: unknown;
 
   let pipelineRecovered = false;
   if (stream) {

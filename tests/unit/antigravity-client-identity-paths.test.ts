@@ -36,10 +36,9 @@ test.after(() => {
 });
 
 test("executor token refresh uses the selected CLI identity", async () => {
-  seedAntigravityCliVersionCache("1.1.1");
   globalThis.fetch = async (url, init) => {
     assert.match(String(url), /oauth2\.googleapis\.com\/token$/);
-    assert.equal(new Headers(init?.headers).get("User-Agent"), antigravityCliUserAgent("1.1.1"));
+    assert.equal(new Headers(init?.headers).get("User-Agent"), antigravityCliUserAgent("1.1.5"));
     return Response.json({
       access_token: "new-token",
       refresh_token: "new-refresh",
@@ -51,13 +50,23 @@ test("executor token refresh uses the selected CLI identity", async () => {
     {
       refreshToken: "refresh",
       projectId: "project-1",
-      providerSpecificData: { clientProfile: "cli" },
+      providerSpecificData: {
+        clientProfile: "cli",
+        clientContractId: "antigravity-wire-cli-synthetic-v1",
+        clientObservedVersion: "1.1.5",
+        clientVersionState: "unverified",
+        clientContextSource: "credential",
+      },
     },
     null
   );
 
   assert.equal(result?.accessToken, "new-token");
-  assert.deepEqual(result?.providerSpecificData, { clientProfile: "cli" });
+  assert.equal(result?.providerSpecificData?.clientProfile, "cli");
+  assert.equal(result?.providerSpecificData?.clientContractId, "antigravity-wire-cli-synthetic-v1");
+  assert.equal(result?.providerSpecificData?.clientObservedVersion, "1.1.5");
+  assert.equal(result?.providerSpecificData?.clientVersionState, "unverified");
+  assert.equal(result?.providerSpecificData?.clientContextSource, "credential");
 });
 
 test("credits retry keeps the selected CLI identity after fingerprint serialization", async () => {
@@ -89,6 +98,14 @@ test("credits retry keeps the selected CLI identity after fingerprint serializat
       projectId: "project-1",
       providerSpecificData: { clientProfile: "cli" },
     },
+    upstreamExtraHeaders: {
+      "X-Forwarded-For": "127.0.0.1",
+      "X-Stainless-Lang": "js",
+      "Sec-Fetch-Site": "cross-site",
+      Referer: "https://example.test",
+      Priority: "u=1",
+      "X-OmniRoute-Source": "test",
+    },
     log: { debug() {}, warn() {}, info() {} },
   });
 
@@ -96,9 +113,19 @@ test("credits retry keeps the selected CLI identity after fingerprint serializat
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].body.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
   for (const call of calls) {
-    assert.equal(call.headers.get("User-Agent"), antigravityCliUserAgent("1.1.1"));
+    assert.equal(call.headers.get("User-Agent"), antigravityCliUserAgent("1.1.5"));
     assert.equal(call.headers.get("x-client-name"), null);
     assert.equal(call.headers.get("X-Goog-Api-Client"), null);
+    for (const name of [
+      "x-forwarded-for",
+      "x-stainless-lang",
+      "sec-fetch-site",
+      "referer",
+      "priority",
+      "x-omniroute-source",
+    ]) {
+      assert.equal(call.headers.get(name), null, `${name} must not reach upstream`);
+    }
   }
 });
 
@@ -137,7 +164,7 @@ test("image generation forwards the selected CLI identity and public envelope", 
   });
 
   assert.equal(result.success, true);
-  assert.equal(capturedHeaders.get("User-Agent"), antigravityCliUserAgent("1.1.1"));
+  assert.equal(capturedHeaders.get("User-Agent"), antigravityCliUserAgent("1.1.5"));
   assert.equal(capturedHeaders.get("x-client-name"), null);
   assert.equal(capturedHeaders.get("X-Goog-Api-Client"), null);
   assert.equal(capturedBody.userAgent, "antigravity");

@@ -38,6 +38,8 @@ import {
   markConnectionQuotaExhausted,
   resolveAntigravityBodyRetryHint,
 } from "../../open-sse/executors/antigravity.ts";
+import { buildAntigravityCompatibilityEvent } from "../../open-sse/services/antigravityCompatibilityDiagnostics.ts";
+import { AntigravityExecutor } from "../../open-sse/executors/antigravity.ts";
 
 test.after(() => {
   clearAllModelLockouts();
@@ -46,6 +48,55 @@ test.after(() => {
 });
 
 // ── Engine contract (regression guard) ───────────────────────────────────────
+
+test("429 compatibility event records a capped bounded retry decision", () => {
+  const event = buildAntigravityCompatibilityEvent({
+    context: {
+      profile: "ide",
+      contractId: "antigravity-wire-ide-synthetic-v1",
+      observedVersion: null,
+      versionState: "unverified",
+      source: "provider-default",
+    },
+    surface: "credits",
+    requestType: "agent",
+    attempt: 2,
+    errorClass: "quota_rate_limit",
+    retryDecision: "bounded_retry",
+    bodyShape: { request: { contents: [{ role: "user", parts: [] }] }, stream: true },
+    headerNames: ["retry-after", "authorization"],
+    durationMs: 1,
+  });
+  assert.equal(event.retryDecision, "bounded_retry");
+  assert.equal(event.attempt, 2);
+  assert.equal(event.errorClass, "quota_rate_limit");
+});
+
+test("project-header retry is bounded to one retry when the header was present", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("forbidden", { status: 403 });
+  };
+  try {
+    const executor = new AntigravityExecutor();
+    const result = await executor.execute({
+      model: "antigravity/gemini-2.5-flash",
+      body: { project: "project-1", request: { contents: [] } },
+      stream: true,
+      credentials: { accessToken: "token", projectId: "project-1" },
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    assert.equal(result.response.status, 403);
+    assert.ok(
+      calls >= 2 && calls <= 4,
+      `project-header retry must remain bounded (calls=${calls})`
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("decide429: quota_exhausted category → full_quota_exhausted kind with 24h cooldown", () => {
   const decision = decide429("quota_exhausted", null);

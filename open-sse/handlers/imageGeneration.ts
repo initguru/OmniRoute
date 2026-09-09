@@ -9,7 +9,10 @@ import {
 
 import { getImageProvider, parseImageModel } from "../config/imageRegistry.ts";
 import { HTTP_STATUS } from "../config/constants.ts";
-import { applyAntigravityClientProfileHeaders } from "../services/antigravityClientProfile.ts";
+import {
+  applyAntigravityClientProfileHeaders,
+  getAntigravityClientContext,
+} from "../services/antigravityClientProfile.ts";
 import { getAntigravityEnvelopeUserAgent } from "../services/antigravityIdentity.ts";
 import { kieExecutor } from "../executors/kie.ts";
 import { mapImageSize } from "../translator/image/sizeMapper.ts";
@@ -24,13 +27,7 @@ import {
   isJsonObject,
   parseKieResultJson,
 } from "../utils/kieTask.ts";
-import {
-  submitComfyWorkflow,
-  pollComfyResult,
-  fetchComfyOutput,
-  extractComfyOutputFiles,
-  resolveComfyUiBaseUrl,
-} from "../utils/comfyuiClient.ts";
+import { resolveComfyUiBaseUrl } from "../utils/comfyuiClient.ts";
 import { fetchRemoteImage } from "@/shared/network/remoteImageFetch";
 import {
   FetchTimeoutError,
@@ -311,12 +308,6 @@ const BFL_EDIT_MODELS = new Set([
 
 const BFL_FAILURE_STATUSES = new Set(["Error", "Failed", "Content Moderated", "Request Moderated"]);
 
-function formatImageProviderError(err) {
-  const sanitized = sanitizeErrorMessage(err);
-  const message = (sanitized || "").replace(/^Error:\s*/i, "").trim();
-  return message ? `Image provider error: ${message}` : "Image provider error";
-}
-
 const STABILITY_GENERATION_ENDPOINTS = {
   "sd3.5-large": "/v2beta/stable-image/generate/sd3",
   "sd3.5-large-turbo": "/v2beta/stable-image/generate/sd3",
@@ -391,7 +382,7 @@ export async function handleImageGeneration({
   log,
   resolvedProvider = null,
   signal = null,
-  clientHeaders = null,
+  _clientHeaders = null,
   peerLocality = null,
 }) {
   const requestedModel = typeof body?.model === "string" ? body.model : "";
@@ -1054,6 +1045,7 @@ async function handleGeminiImageGeneration({ model, providerConfig, body, creden
     });
   }
 
+  const clientContext = getAntigravityClientContext(provider, credentialRecord);
   const antigravityBody = {
     project: projectId,
     requestId: `image_gen/${Date.now()}/${randomUUID()}/0`,
@@ -1081,7 +1073,7 @@ async function handleGeminiImageGeneration({ model, providerConfig, body, creden
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
-  applyAntigravityClientProfileHeaders(headers, credentialRecord, antigravityBody);
+  applyAntigravityClientProfileHeaders(headers, credentialRecord, antigravityBody, clientContext);
   delete headers["x-goog-user-project"];
 
   if (log) {

@@ -244,6 +244,58 @@ function shouldPreserveQuotaSignalsFor429(provider?: string | null): boolean {
   return getProviderCategory(provider) === "oauth";
 }
 
+export function classifyAntigravityCompatibilityError(
+  statusCode: number,
+  responseBody: unknown,
+  provider?: string | null
+): import("./antigravityCompatibilityDiagnostics.ts").AntigravityCompatibilityErrorClass {
+  const body = responseBodyToString(responseBody);
+  const lowered = body.toLowerCase();
+  if (statusCode >= 500 || statusCode === 408) return "transport";
+
+  // Explicit request/schema and compatibility-version signals must win over generic
+  // quota/credit prose. Some INVALID_ARGUMENT responses echo field names such as
+  // `quotaType`, which must not be mistaken for a billing failure.
+  if (
+    statusCode === 400 &&
+    (isContextOverflow(body) ||
+      containsModelUnavailableMessage(body) ||
+      lowered.includes("invalid json") ||
+      lowered.includes("invalid argument") ||
+      lowered.includes("invalid_argument") ||
+      lowered.includes("unknown field"))
+  ) {
+    return "schema_rejection";
+  }
+  if (
+    statusCode === 422 &&
+    (lowered.includes("antigravity_compatibility") || lowered.includes("version compatibility"))
+  ) {
+    return "version_compatibility";
+  }
+
+  // A compatibility 401 is an authentication failure even when the upstream
+  // only returns a generic `Unauthorized` body.
+  if (statusCode === 401) return "auth_failure";
+  if (statusCode === 403 && isAccountDeactivated(body)) return "auth_failure";
+  if (statusCode === 403 && isCloudflareFingerprintRejection(body)) return "auth_failure";
+  if (
+    statusCode === 403 &&
+    classifyProviderError(statusCode, responseBody, provider) ===
+      PROVIDER_ERROR_TYPES.PROJECT_ROUTE_ERROR
+  ) {
+    return "project_route";
+  }
+  // Explicit rate-limit/quota statuses retain their existing semantics regardless
+  // of incidental body prose (including a geo-looking message).
+  if (statusCode === 429 || statusCode === 402) return "quota_rate_limit";
+  if (isGeoBlockEligibleProvider(provider) && isGeoBlockedError(body)) return "geo_eligibility";
+  if (isDailyQuotaExhausted(body) || lowered.includes("quota") || lowered.includes("credit")) {
+    return "quota_rate_limit";
+  }
+  return "unknown";
+}
+
 export function classifyProviderError(
   statusCode: number,
   responseBody: unknown,
@@ -256,7 +308,10 @@ export function classifyProviderError(
   const oauthInvalid = isOAuthInvalidToken(bodyStr);
   const preserveQuota429 = shouldPreserveQuotaSignalsFor429(provider);
 
-  if ((creditsExhausted || subscriptionQuotaExhausted) && [400, 401, 402, 403].includes(statusCode)) {
+  if (
+    (creditsExhausted || subscriptionQuotaExhausted) &&
+    [400, 401, 402, 403].includes(statusCode)
+  ) {
     return PROVIDER_ERROR_TYPES.QUOTA_EXHAUSTED;
   }
 

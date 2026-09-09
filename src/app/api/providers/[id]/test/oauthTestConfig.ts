@@ -1,7 +1,7 @@
 import { buildGitLabOAuthEndpoints, resolveGitLabOAuthBaseUrl } from "@/lib/oauth/gitlab";
 import { ANTIGRAVITY_RUNTIME_BASE_URLS } from "@omniroute/open-sse/config/antigravityUpstream.ts";
 import { getAntigravityContentHeaders } from "@omniroute/open-sse/services/antigravityHeaders.ts";
-import { getAntigravityClientProfile } from "@omniroute/open-sse/services/antigravityClientProfile.ts";
+import { getAntigravityClientContext } from "@omniroute/open-sse/services/antigravityClientProfile.ts";
 import { isGeoBlockedError } from "@omniroute/open-sse/services/errorClassifier.ts";
 
 // Real model-surface probe for antigravity/agy. The previous probe only hit the
@@ -15,10 +15,17 @@ import { isGeoBlockedError } from "@omniroute/open-sse/services/errorClassifier.
 // Mirrors AntigravityExecutor.buildUrl/buildHeaders so the probe exercises the
 // exact same surface as real requests.
 function buildAntigravityProbe(
-  connection: { providerSpecificData?: unknown },
+  connection: { provider?: string; providerSpecificData?: unknown },
   accessToken: string
 ) {
-  const profile = getAntigravityClientProfile(connection as never);
+  const provider = connection.provider === "agy" ? "agy" : "antigravity";
+  const clientContext = getAntigravityClientContext(provider, {
+    accessToken,
+    providerSpecificData:
+      connection.providerSpecificData && typeof connection.providerSpecificData === "object"
+        ? (connection.providerSpecificData as Record<string, unknown>)
+        : undefined,
+  });
   return {
     url: `${ANTIGRAVITY_RUNTIME_BASE_URLS[0]}/v1internal:streamGenerateContent?alt=sse`,
     method: "POST",
@@ -26,7 +33,7 @@ function buildAntigravityProbe(
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      ...getAntigravityContentHeaders(profile, accessToken),
+      ...getAntigravityContentHeaders({ accessToken }, clientContext),
     },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: "ping" }] }],

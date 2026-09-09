@@ -1,6 +1,11 @@
 import { ANTIGRAVITY_CONFIG } from "../constants/oauth";
 import type { AntigravityClientProfile } from "@/shared/constants/antigravityClientProfile";
 import {
+  createAntigravityClientContext,
+  getAntigravityClientContextMetadata,
+  type AntigravityClientContext,
+} from "@omniroute/open-sse/services/antigravityClientProfile.ts";
+import {
   getAntigravityContentHeaders,
   getAntigravityIdeNodeHeaders,
   getAntigravityLoadCodeAssistMetadata,
@@ -66,11 +71,12 @@ async function fetchFirstOk(endpoints: string[], init: RequestInit, timeoutMs?: 
 
 function getPostExchangeHeaders(
   profile: AntigravityClientProfile,
-  accessToken: string
+  accessToken: string,
+  context: AntigravityClientContext
 ): Record<string, string> {
   return profile === "cli"
-    ? getAntigravityContentHeaders("cli", accessToken)
-    : getAntigravityIdeNodeHeaders(accessToken);
+    ? getAntigravityContentHeaders({ accessToken }, context)
+    : getAntigravityIdeNodeHeaders(accessToken, context);
 }
 
 function buildAntigravityAuthUrl(
@@ -164,8 +170,12 @@ async function postExchangeAntigravity(
   clientProfile: AntigravityClientProfile,
   tokens: AntigravityTokenPayload
 ): Promise<AntigravityPostExchange> {
-  const headers = getPostExchangeHeaders(clientProfile, tokens.access_token);
-  const metadata = getAntigravityLoadCodeAssistMetadata();
+  const context = createAntigravityClientContext(
+    clientProfile === "cli" ? "agy" : "antigravity",
+    { providerSpecificData: { clientProfile } }
+  );
+  const headers = getPostExchangeHeaders(clientProfile, tokens.access_token, context);
+  const metadata = getAntigravityLoadCodeAssistMetadata(context);
   const userInfoResponse = await fetch(`${config.userInfoUrl}?alt=json`, {
     headers: { Authorization: `Bearer ${tokens.access_token}` },
     signal: AbortSignal.timeout(POSTEXCHANGE_TIMEOUT_MS),
@@ -261,6 +271,12 @@ function mapAntigravityTokens(
     projectDiscoveryOutcome: extra?.projectDiscoveryOutcome,
     providerSpecificData: {
       clientProfile,
+      ...getAntigravityClientContextMetadata(
+        createAntigravityClientContext(
+          clientProfile === "cli" ? "agy" : "antigravity",
+          { providerSpecificData: { clientProfile } }
+        )
+      ),
       projectId: extra?.projectId,
       tier: extra?.tierId,
       // Which OAuth client issued this connection's refresh token. The token

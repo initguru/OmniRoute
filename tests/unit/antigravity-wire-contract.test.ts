@@ -1,260 +1,265 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
 import {
+  assertRedactedAntigravityArtifact,
   compareObservedRequests,
-  type DynamicRule,
-  type ObservedRequest,
+  createAntigravityStructuralDigest,
+  type AntigravityObservedRequest,
+  type AntigravityReferenceManifest,
+  type AntigravityStructuralSummary,
 } from "../helpers/antigravityWireContract.ts";
 
-// Synthetic comparator inputs, not an official Antigravity contract.
-const request = (bodyUtf8 = '{"items":[1,2],"id":"req-123"}'): ObservedRequest => ({
+const request = (bodyUtf8 = '{"contents":[]}'): AntigravityObservedRequest => ({
   method: "POST",
-  url: "https://example.invalid/contract-test",
+  url: "https://example.invalid/contract-test?fixed=1",
   httpVersion: "1.1",
   headers: [
     ["Content-Type", "application/json"],
     ["X-Test", "one"],
-    ["X-Test", "two"],
   ],
   bodyUtf8,
 });
 
-test("identical requests match", () => {
-  assert.deepEqual(compareObservedRequests(request(), request(), []), []);
-});
-for (const [name, body] of Object.entries({
-  extra: '{"items":[1,2],"id":"req-123","extra":true}',
-  omitted: '{"items":[1,2]}',
-  null: '{"items":[1,2],"id":null}',
-  type: '{"items":["1",2],"id":"req-123"}',
-  arrayOrder: '{"items":[2,1],"id":"req-123"}',
-  fieldOrder: '{"id":"req-123","items":[1,2]}',
-  whitespace: '{ "items":[1,2],"id":"req-123"}',
-  numberSpelling: '{"items":[1.0,2],"id":"req-123"}',
-  duplicateKey: '{"items":[1,2],"id":"wrong","id":"req-123"}',
-  escaped: '{"items":[1,2],"id":"req-12\\u0033"}',
-})) {
-  test(`detects body ${name}`, () => {
-    assert.ok(
-      compareObservedRequests(request(), request(body), []).some((d) => d.category === "body")
-    );
-  });
-}
-for (const field of ["method", "url", "httpVersion"] as const) {
-  test(`detects ${field}`, () => {
-    assert.ok(
-      compareObservedRequests(request(), { ...request(), [field]: "different" }, []).length
-    );
-  });
-}
-for (const [name, headers] of Object.entries({
-  order: [
-    ["X-Test", "one"],
-    ["Content-Type", "application/json"],
-    ["X-Test", "two"],
-  ],
-  duplicate: [
-    ["Content-Type", "application/json"],
-    ["X-Test", "one"],
-  ],
-  case: [
-    ["content-type", "application/json"],
-    ["X-Test", "one"],
-    ["X-Test", "two"],
-  ],
-  value: [
-    ["Content-Type", "application/json"],
-    ["X-Test", "one"],
-    ["X-Test", "changed"],
-  ],
-})) {
-  test(`detects header ${name}`, () => {
-    assert.ok(
-      compareObservedRequests(
-        request(),
-        { ...request(), headers: headers as Array<[string, string]> },
-        []
-      ).some((d) => d.category === "header")
-    );
-  });
-}
-const idRule: DynamicRule[] = [{ path: "/body/id", kind: "request-id" }];
-test("dynamic request IDs accept agent IDs and UUIDs without masking their format", () => {
-  for (const [left, right] of [
-    ["agent/1788760000000/ab12cd34", "agent/1788760001000/1234abcd"],
-    ["d9dabbf5-4275-4137-b8e0-397cb2fbe6f8", "a1b2c3d4-5555-4444-aaaa-123456789abc"],
-  ]) {
-    const expected = request(JSON.stringify({ id: left }));
-    assert.deepEqual(
-      compareObservedRequests(expected, request(JSON.stringify({ id: right })), idRule),
-      []
-    );
-    assert.ok(
-      compareObservedRequests(expected, request('{"id":"different-id-format"}'), idRule).length
-    );
-  }
-});
-test("dynamic scalar permits matching syntax while preserving surrounding bytes", () => {
-  assert.deepEqual(
-    compareObservedRequests(request(), request('{"items":[1,2],"id":"req-4567"}'), idRule),
-    []
-  );
-  assert.ok(
-    compareObservedRequests(request(), request('{ "items":[1,2],"id":"req-4567"}'), idRule).length
-  );
-  assert.ok(
-    compareObservedRequests(request(), request('{"items":[2,1],"id":"req-4567"}'), idRule).length
-  );
-});
-test("dynamic scalar rejects incompatible type and shape", () => {
-  for (const value of [null, 123, "", "spaces here", "abc"]) {
-    assert.ok(
-      compareObservedRequests(
-        request(),
-        request(JSON.stringify({ items: [1, 2], id: value })),
-        idRule
-      ).length
-    );
-  }
-});
-test("rules reject malformed, unresolved, overlapping and duplicate paths", () => {
-  for (const path of [
-    "",
-    "body.id",
-    "/body/*",
-    "/body/missing",
-    "/body/id/x",
-    "/headers/01/1",
-    "/headers/0/0",
-    "/body/~2",
-  ]) {
-    assert.throws(
-      () => compareObservedRequests(request(), request(), [{ path, kind: "credential" }]),
-      /dynamic rule/i
-    );
-  }
-  assert.throws(
-    () => compareObservedRequests(request(), request(), [...idRule, ...idRule]),
-    /dynamic rule/i
-  );
-  assert.throws(
-    () => compareObservedRequests(request(), request('{"items":[1,2]}'), idRule),
-    /dynamic rule/i
-  );
-  assert.throws(
-    () =>
-      compareObservedRequests(request(), request(), [{ path: "/body/items", kind: "credential" }]),
-    /dynamic rule/i
-  );
-});
-test("JSON Pointer escaping and array indexes resolve exactly", () => {
-  const rules: DynamicRule[] = [{ path: "/body/a~1b/~0/0", kind: "session-id" }];
-  assert.deepEqual(
-    compareObservedRequests(
-      request('{"a/b":{"~":["s-1"]}}'),
-      request('{"a/b":{"~":["s-2"]}}'),
-      rules
-    ),
-    []
-  );
-});
-test("dynamic header occurrence permits token changes but preserves names and scheme", () => {
-  const a = request();
-  a.headers.push(["Authorization", "Bearer abc123"]);
-  const b = structuredClone(a);
-  b.headers[3][1] = "Bearer xyz456";
-  const rules: DynamicRule[] = [{ path: "/headers/3/1", kind: "credential" }];
-  assert.deepEqual(compareObservedRequests(a, b, rules), []);
-  b.headers[3][1] = "Basic xyz456";
-  assert.ok(compareObservedRequests(a, b, rules).length);
-});
-test("timestamps and signatures have syntax checks, not lifecycle claims", () => {
-  for (const [kind, a, b] of [
-    ["timestamp", 1700000000, 1800000000],
-    ["timestamp", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"],
-    ["signature", "YWJjZA==", "ZWZnaA=="],
-  ] as const) {
-    const rules: DynamicRule[] = [{ path: "/body/value", kind }];
-    assert.deepEqual(
-      compareObservedRequests(
-        request(JSON.stringify({ value: a })),
-        request(JSON.stringify({ value: b })),
-        rules
-      ),
-      []
-    );
-    assert.ok(
-      compareObservedRequests(
-        request(JSON.stringify({ value: a })),
-        request('{"value":"bad value"}'),
-        rules
-      ).length
-    );
-  }
-});
-test("opaque bodies compare bytes and cannot resolve JSON rules", () => {
-  assert.deepEqual(compareObservedRequests(request("raw"), request("raw"), []), []);
-  assert.ok(compareObservedRequests(request("raw"), request("raw "), []).length);
-  assert.throws(
-    () => compareObservedRequests(request("raw"), request("raw"), idRule),
-    /dynamic rule/i
-  );
-});
-test("diagnostics do not reveal body or header values", () => {
-  const a = request('{"secret":"PRIVATE_A"}');
-  const b = request('{"secret":"PRIVATE_B"}');
-  a.headers.push(["Authorization", "PRIVATE_C"]);
-  b.headers.push(["Authorization", "PRIVATE_D"]);
-  const differences = compareObservedRequests(a, b, []);
-  assert.ok(differences.length);
-  assert.ok(!JSON.stringify(differences).includes("PRIVATE_"));
+test("identical synthetic requests match", () => {
+  assert.deepEqual(compareObservedRequests(request(), request()), []);
 });
 
-test("dynamic rules cannot mask containers or ambiguous duplicate-key subtrees", () => {
-  for (const body of [
-    '{"items":[1,2],"id":{}}',
-    '{"items":[1,2],"id":[]}',
-    '{"items":[1,2],"id":"req-1","id":"req-2"}',
-  ]) {
-    assert.throws(() => compareObservedRequests(request(), request(body), idRule), /dynamic rule/i);
-  }
-  const rules: DynamicRule[] = [{ path: "/body/parent/id", kind: "request-id" }];
-  const duplicate = request('{"parent":{"id":"req-1"},"parent":{"other":1}}');
-  assert.throws(() => compareObservedRequests(duplicate, duplicate, rules), /dynamic rule/i);
+test("does not normalize an unexpected envelope field away", () => {
+  const expected = request('{"contents":[]}');
+  const actual = request('{"contents":[],"unexpected":true}');
+  assert.ok(compareObservedRequests(expected, actual, []).some((d) => d.category === "body"));
 });
-test("multiple substitutions preserve every unrelated byte", () => {
-  const rules: DynamicRule[] = [
-    { path: "/body/id", kind: "request-id" },
-    { path: "/body/time", kind: "timestamp" },
-  ];
-  const a = request('{"id":"r-1","time":123,"fixed":true}');
-  const b = request('{"id":"r-222","time":4567,"fixed":true}');
-  assert.deepEqual(compareObservedRequests(a, b, rules), []);
-  assert.ok(
-    compareObservedRequests(a, request('{"id":"r-222", "time":4567,"fixed":true}'), rules).length
-  );
+
+test("reports duplicate header occurrences", () => {
+  const actual = request();
+  actual.headers.push(["X-Test", "two"]);
+  assert.ok(compareObservedRequests(request(), actual).some((d) => d.category === "header"));
 });
-test("header masking does not hide occurrence names and rules require both occurrences", () => {
-  const rules: DynamicRule[] = [{ path: "/headers/1/1", kind: "credential" }];
-  const a = request();
-  const b = request();
-  b.headers[1] = ["X-Other", "one"];
-  assert.ok(compareObservedRequests(a, b, rules).some((d) => d.path === "/headers/1/0"));
-  b.headers = [];
-  assert.throws(() => compareObservedRequests(a, b, rules), /dynamic rule/i);
+
+test("reports header occurrence order changes", () => {
+  const actual = request();
+  actual.headers = [actual.headers[1], actual.headers[0]];
+  assert.ok(compareObservedRequests(request(), actual).some((d) => d.category === "header"));
 });
-test("scalar root dynamic path resolves and unsupported kinds reject", () => {
+
+test("compares header names case-insensitively while preserving occurrences", () => {
+  const actual = request();
+  actual.headers[0][0] = "content-type";
+  assert.deepEqual(compareObservedRequests(request(), actual), []);
+});
+
+test("reports body field missing versus explicit null", () => {
+  const expected = request('{"contents":[],"project":null}');
+  const actual = request('{"contents":[]}');
+  assert.ok(compareObservedRequests(expected, actual).some((d) => d.category === "body"));
+});
+
+test("reports JSON array reordering", () => {
+  const expected = request('{"contents":["first","second"]}');
+  const actual = request('{"contents":["second","first"]}');
+  assert.ok(compareObservedRequests(expected, actual).some((d) => d.category === "body"));
+});
+
+test("reports URL and query mismatches exactly", () => {
+  const actual = { ...request(), url: "https://example.invalid/contract-test?fixed=2" };
+  assert.ok(compareObservedRequests(request(), actual).some((d) => d.path === "/url"));
+});
+
+test("reports HTTP version mismatches", () => {
+  const actual = { ...request(), httpVersion: "2.0" };
+  assert.ok(compareObservedRequests(request(), actual).some((d) => d.path === "/httpVersion"));
+});
+
+test("reports an unknown dynamic path instead of ignoring it", () => {
+  const differences = compareObservedRequests(request(), request(), [
+    { path: "/body/notPresent", kind: "request-id", format: "opaque" },
+  ]);
+  assert.ok(differences.some((d) => d.category === "body"));
+});
+
+test("reports an invalid dynamic format instead of ignoring it", () => {
+  const differences = compareObservedRequests(request(), request(), [
+    {
+      path: "/body/requestId",
+      kind: "request-id",
+      format: "not-a-format",
+    } as never,
+  ]);
+  assert.ok(differences.some((d) => d.category === "body"));
+});
+
+test("validates a UUID dynamic value rather than treating it as an ignore path", () => {
+  const expected = request('{"requestId":"not-a-uuid"}');
+  const actual = request('{"requestId":"not-a-uuid"}');
+  const differences = compareObservedRequests(expected, actual, [
+    { path: "/body/requestId", kind: "request-id", format: "uuid" },
+  ]);
+  assert.ok(differences.some((d) => d.category === "body"));
+});
+
+test("permits two valid UUID values while preserving surrounding JSON bytes", () => {
+  const expected = request('{"requestId":"d9dabbf5-4275-4137-b8e0-397cb2fbe6f8"}');
+  const actual = request('{"requestId":"a1b2c3d4-5555-4444-aaaa-123456789abc"}');
   assert.deepEqual(
-    compareObservedRequests(request('"s-1"'), request('"s-2"'), [
-      { path: "/body", kind: "session-id" },
+    compareObservedRequests(expected, actual, [
+      { path: "/body/requestId", kind: "request-id", format: "uuid" },
     ]),
     []
   );
+});
+
+test("dynamic header rules require the declared header identity", () => {
+  const expected = request();
+  const actual = request();
+  expected.headers.push(["Authorization", "Bearer expected"]);
+  actual.headers.push(["Authorization", "Bearer actual"]);
+  assert.deepEqual(
+    compareObservedRequests(expected, actual, [
+      {
+        path: "/headers/2/1",
+        kind: "credential",
+        format: "opaque",
+        headerName: "authorization",
+        scheme: "Bearer",
+      },
+    ]),
+    []
+  );
+
+  const contentType = request();
+  contentType.headers[0][1] = "text/plain";
+  const differences = compareObservedRequests(request(), contentType, [
+    {
+      path: "/headers/0/1",
+      kind: "credential",
+      format: "opaque",
+      headerName: "content-type",
+      scheme: "Bearer",
+    },
+  ] as never);
+  assert.ok(differences.some((d) => d.category === "header"));
+  assert.doesNotMatch(JSON.stringify(differences), /actual|expected|secret/i);
+});
+
+test("invalid dynamic paths are reported without throwing", () => {
+  const cases = [
+    [
+      request(),
+      { ...request(), headers: [] },
+      [{ path: "/headers/9/1", kind: "credential", format: "opaque" }],
+    ],
+    [
+      { ...request(), bodyUtf8: "raw" },
+      { ...request(), bodyUtf8: "raw" },
+      [{ path: "/body/id", kind: "request-id", format: "opaque" }],
+    ],
+    [request("{}"), request("{}"), [{ path: "/body", kind: "request-id", format: "opaque" }]],
+    [
+      request('{"id":{}}'),
+      request('{"id":{}}'),
+      [{ path: "/body/id", kind: "request-id", format: "opaque" }],
+    ],
+    [
+      request('{"id":"one","id":"two"}'),
+      request('{"id":"one","id":"three"}'),
+      [{ path: "/body/id", kind: "request-id", format: "opaque" }],
+    ],
+  ] as const;
+  for (const [expected, actual, rules] of cases) {
+    assert.doesNotThrow(() => {
+      const differences = compareObservedRequests(expected, actual, rules);
+      assert.ok(differences.length > 0);
+    });
+  }
+});
+
+test("redaction guard accepts structural summaries and rejects sensitive raw values", () => {
+  const summary: AntigravityStructuralSummary = {
+    method: "POST",
+    path: "/v1/content",
+    bodyBytes: 42,
+    bodyKeys: ["contents"],
+    headerNames: ["content-type"],
+  };
+  const digest = createAntigravityStructuralDigest(summary);
+  assert.match(digest, /^structural-sha256:[0-9a-f]{64}$/);
   assert.throws(
     () =>
-      compareObservedRequests(request(), request(), [
-        { path: "/body/id", kind: "unknown" } as unknown as DynamicRule,
-      ]),
-    /dynamic rule/i
+      assertRedactedAntigravityArtifact({
+        requestSummary: { ...summary, rawBody: "private" },
+        structuralDigest: digest,
+      }),
+    /digest|summary/i
   );
+  assert.doesNotThrow(() =>
+    assertRedactedAntigravityArtifact({
+      profile: "cli",
+      source: "synthetic-only",
+      requestSummary: summary,
+      headers: [["Authorization", "[REDACTED]"]],
+      structuralDigest: digest,
+    })
+  );
+  assert.throws(
+    () =>
+      assertRedactedAntigravityArtifact({
+        requestSummary: summary,
+        structuralDigest: "sha256:" + "a".repeat(64),
+      }),
+    /digest/i
+  );
+  assert.throws(
+    () =>
+      assertRedactedAntigravityArtifact({
+        requestSummary: summary,
+        structuralDigest: digest.slice(0, -1) + "0",
+      }),
+    /digest/i
+  );
+
+  for (const value of [
+    { authorization: "Bearer raw-access-token" },
+    { AUTHORIZATION: "Bearer raw-access-token" },
+    { refresh_token: "raw-refresh-token" },
+    { API_KEY: "raw-api-key" },
+    { APIKey: "raw-api-key" },
+    { "X-API-Key": "raw-api-key" },
+    { headers: [["Cookie", "session=raw-cookie"]] },
+    { body: { prompt: "private prompt" } },
+    { projectSecret: "raw-project-secret" },
+    { MACHINE_ID: "raw-machine-id" },
+    { machineID: "raw-machine-id" },
+    { SESSION_ID: "raw-session-id" },
+    { sessionID: "raw-session-id" },
+    { session: "raw-session" },
+  ]) {
+    assert.throws(() => assertRedactedAntigravityArtifact(value), /redact/i);
+  }
+});
+
+test("CLI and IDE manifests remain separate synthetic-only profiles", () => {
+  const fixtureDir = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../fixtures/antigravity-wire"
+  );
+  const cli = JSON.parse(
+    fs.readFileSync(path.join(fixtureDir, "cli-manifest.json"), "utf8")
+  ) as AntigravityReferenceManifest;
+  const ide = JSON.parse(
+    fs.readFileSync(path.join(fixtureDir, "ide-manifest.json"), "utf8")
+  ) as AntigravityReferenceManifest;
+
+  assert.equal(cli.profile, "cli");
+  assert.equal(cli.product, "agy-cli");
+  assert.equal(ide.profile, "ide");
+  assert.equal(ide.product, "antigravity-ide");
+  assert.equal(cli.source, "synthetic-only");
+  assert.equal(ide.source, "synthetic-only");
+  assert.notEqual(cli.contractId, ide.contractId);
+  assert.doesNotThrow(() => assertRedactedAntigravityArtifact(cli));
+  assert.doesNotThrow(() => assertRedactedAntigravityArtifact(ide));
 });

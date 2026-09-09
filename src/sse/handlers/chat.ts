@@ -130,6 +130,13 @@ import {
 } from "./reasoningRouting";
 import { createVirtualAutoCombo, resolveAutoRoutingState } from "./autoRouting";
 import { getComboFailureLogError } from "./comboFailureLogging";
+import {
+  attachVerifiedAgentBridgeRoutingContext,
+  consumeVerifiedAgentBridgeRoutingContext,
+  stripAgentBridgeRoutingContextAssertion,
+  verifyActiveAgentBridgeRoutingContextAssertion,
+} from "@/mitm/agentBridgeRoutingContext.ts";
+import { resolveVerifiedAgentBridgeAntigravityConnection } from "@/lib/db/agentBridgeState";
 
 // Pipeline integration — wired modules
 import { classify429FromError, type FailureKind } from "@/shared/utils/classify429";
@@ -423,6 +430,7 @@ async function handleChatImplementation(
   correlationId: string | undefined,
   admissionContext: chatAdmission.ChatAdmissionContext
 ) {
+  const verifiedAgentBridgeConnectionId = consumeVerifiedAgentBridgeRoutingContext(request);
   const peerRejection = rejectPeerRequest(request?.headers, log.warn, errorResponse);
   if (peerRejection) return peerRejection;
 
@@ -660,7 +668,10 @@ async function handleChatImplementation(
   const externalSessionId = extractExternalSessionId(request.headers);
   const sessionId = externalSessionId || generateStableSessionId(body);
   const sessionAffinityKey = extractSessionAffinityKey(body, request.headers) || sessionId;
-  const requestedConnectionId = request.headers.get("x-omniroute-connection")?.trim() || null;
+  const requestedConnectionId =
+    verifiedAgentBridgeConnectionId ||
+    request.headers.get("x-omniroute-connection")?.trim() ||
+    null;
   if (sessionId) {
     touchSession(sessionId);
   }
@@ -999,7 +1010,8 @@ async function handleChatImplementation(
     const getComboCredentialCacheKey = (
       modelString: string,
       target?: { connectionId?: string | null; executionKey?: string | null }
-    ) => `${target?.executionKey || target?.connectionId || ""}:${modelString}`;
+    ) =>
+      `${verifiedAgentBridgeConnectionId || target?.executionKey || target?.connectionId || ""}:${modelString}`;
     const checkModelAvailable = async (
       modelString: string,
       target?: {
@@ -1037,10 +1049,18 @@ async function handleChatImplementation(
       const resolvedModel = modelInfo.model || modelString;
       const githubGate = await ghComboGate(comboPreselectedCredentials, provider, resolvedModel);
       if (githubGate !== null) return githubGate;
+      const forcedConnectionId = verifiedAgentBridgeConnectionId || target?.connectionId || null;
+      const hasForcedConnection =
+        typeof forcedConnectionId === "string" && forcedConnectionId.trim().length > 0;
       let allowedConnections = intersectAllowedConnectionIds(
         apiKeyInfo?.allowedConnections ?? null,
         comboPinAllowlist(true, target?.connectionId ?? null, target?.allowedConnectionIds ?? null)
       );
+      if (verifiedAgentBridgeConnectionId) {
+        allowedConnections = intersectAllowedConnectionIds(allowedConnections, [
+          verifiedAgentBridgeConnectionId,
+        ]);
+      }
 
       // A4: quota-exclusive keys must only use the pool's connection(s).
       if (apiKeyInfo?.allowedQuotas && apiKeyInfo.allowedQuotas.length > 0) {
@@ -1063,7 +1083,7 @@ async function handleChatImplementation(
         {
           sessionKey: sessionAffinityKey,
           ...(target?.allowRateLimitedConnection ? { allowRateLimitedConnections: true } : {}),
-          ...(target?.connectionId ? { forcedConnectionId: target.connectionId } : {}),
+          ...(forcedConnectionId ? { forcedConnectionId } : {}),
           ...(bypassProviderQuotaPolicy ? { bypassQuotaPolicy: true } : {}),
           ...(managedLease ? { lease: credentialLease(managedLease) } : {}),
         }
@@ -1146,8 +1166,13 @@ async function handleChatImplementation(
             sessionId,
             sessionAffinityKey,
             forceLiveComboTest: isComboLiveTest,
-            forcedConnectionId: target?.connectionId ?? null,
-            allowedConnectionIds: target?.allowedConnectionIds ?? null,
+            forcedConnectionId: verifiedAgentBridgeConnectionId || target?.connectionId || null,
+            isAgentBridgeRoutingContext: verifiedAgentBridgeConnectionId !== null,
+            allowedConnectionIds: verifiedAgentBridgeConnectionId
+              ? intersectAllowedConnectionIds(target?.allowedConnectionIds ?? null, [
+                  verifiedAgentBridgeConnectionId,
+                ])
+              : (target?.allowedConnectionIds ?? null),
             comboStepId: target?.stepId || null,
             comboExecutionKey: target?.executionKey || target?.stepId || null,
             skipUpstreamRetry: target?.failoverBeforeRetry ?? false,
@@ -1213,6 +1238,7 @@ async function handleChatImplementation(
     // ── Global Fallback Provider (#689) ────────────────────────────────────
     // If combo exhausted all models, try the global fallback before giving up.
     if (
+      !verifiedAgentBridgeConnectionId &&
       !response.ok &&
       [502, 503].includes(response.status) &&
       typeof (settings as any)?.globalFallbackModel === "string" &&
@@ -1326,6 +1352,10 @@ async function handleChatImplementation(
       sessionAffinityKey,
       forceLiveComboTest: isComboLiveTest,
       forcedConnectionId: requestedConnectionId,
+      allowedConnectionIds: verifiedAgentBridgeConnectionId
+        ? [verifiedAgentBridgeConnectionId]
+        : null,
+      isAgentBridgeRoutingContext: verifiedAgentBridgeConnectionId !== null,
       correlationId: reqId,
       conversationId,
       routingComboId,
@@ -1348,7 +1378,43 @@ async function handleChatImplementation(
   );
 }
 
-export const handleChat = chatAdmission.withChatAdmission(handleChatImplementation);
+const handleChatWithAdmission = chatAdmission.withChatAdmission(handleChatImplementation);
+
+export async function handleChat(
+  request: Request,
+  clientRawRequest: unknown = null,
+  preParsedBody: unknown = null,
+  correlationId?: string
+): Promise<Response> {
+  const assertion = request.headers.get("x-omniroute-agent-bridge-proof");
+  const isAgentBridgeAntigravity =
+    request.headers.get("x-omniroute-source") === "agent-bridge" &&
+    request.headers.get("x-omniroute-agent") === "antigravity";
+  request = stripAgentBridgeRoutingContextAssertion(request);
+  if (!isAgentBridgeAntigravity) {
+    return handleChatWithAdmission(request, clientRawRequest, preParsedBody, correlationId);
+  }
+  const verified = verifyActiveAgentBridgeRoutingContextAssertion({
+    assertion,
+    agent: "antigravity",
+    path: new URL(request.url).pathname,
+  });
+  const connectionId = await resolveVerifiedAgentBridgeAntigravityConnection({
+    agentId: "antigravity",
+    connectionId: verified?.connectionId ?? null,
+  });
+  if (!connectionId) {
+    return new Response(
+      JSON.stringify({ error: { message: "Invalid AgentBridge routing context" } }),
+      {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+  attachVerifiedAgentBridgeRoutingContext(request, connectionId);
+  return handleChatWithAdmission(request, clientRawRequest, preParsedBody, correlationId);
+}
 
 /** Handle one resolved model through gates, credentials, and retry/fallback. */
 async function handleSingleModelChat(
@@ -1365,6 +1431,7 @@ async function handleSingleModelChat(
     sessionId?: string | null;
     sessionAffinityKey?: string | null;
     forcedConnectionId?: string | null;
+    isAgentBridgeRoutingContext?: boolean;
     allowedConnectionIds?: string[] | null;
     comboStepId?: string | null;
     comboExecutionKey?: string | null;
@@ -1409,6 +1476,10 @@ async function handleSingleModelChat(
   // resolveModelOrError found a combo but the main handler's combo lookup missed it.
   if ((resolved as any).combo) {
     const redirectCombo = (resolved as any).combo;
+    const verifiedAgentBridgeConnectionId =
+      runtimeOptions.isAgentBridgeRoutingContext && runtimeOptions.forcedConnectionId
+        ? runtimeOptions.forcedConnectionId
+        : null;
     if (runtimeOptions.managedLease) return managedComboRejection();
     log.info(
       "ROUTING",
@@ -1449,8 +1520,14 @@ async function handleSingleModelChat(
           {
             sessionId: "", // safety-net redirect doesn't have session context
             forceLiveComboTest: false,
-            forcedConnectionId: null,
-            allowedConnectionIds: null,
+            forcedConnectionId:
+              verifiedAgentBridgeConnectionId || resolvedTarget?.connectionId || null,
+            isAgentBridgeRoutingContext: runtimeOptions.isAgentBridgeRoutingContext === true,
+            allowedConnectionIds: verifiedAgentBridgeConnectionId
+              ? intersectAllowedConnectionIds(resolvedTarget?.allowedConnectionIds ?? null, [
+                  verifiedAgentBridgeConnectionId,
+                ])
+              : (resolvedTarget?.allowedConnectionIds ?? null),
             comboStepId: null,
             comboExecutionKey: null,
             skipUpstreamRetry: resolvedTarget?.failoverBeforeRetry === true,
@@ -1517,6 +1594,7 @@ async function handleSingleModelChat(
       ? runtimeOptions.forcedConnectionId.trim()
       : "";
   const hasForcedConnection = forcedConnectionId.length > 0;
+  const isAgentBridgeRoutingContext = runtimeOptions.isAgentBridgeRoutingContext === true;
   let effectiveAllowedConnections = intersectAllowedConnectionIds(
     apiKeyInfo?.allowedConnections ?? null,
     comboPinAllowlist(isCombo, forcedConnectionId || null, runtimeOptions.allowedConnectionIds)
@@ -1533,7 +1611,7 @@ async function handleSingleModelChat(
 
   const bypassReason = forceLiveComboTest
     ? "combo live test"
-    : hasForcedConnection
+    : hasForcedConnection && !isAgentBridgeRoutingContext
       ? "fixed combo step connection"
       : undefined;
 
@@ -1542,8 +1620,10 @@ async function handleSingleModelChat(
   if (pressureGuard) return pressureGuard.response;
   const providerProfile = await getRuntimeProviderProfile(provider);
   const gate = await checkPipelineGates(provider, model, {
-    ignoreCircuitBreaker: forceLiveComboTest || hasForcedConnection,
-    ignoreModelCooldown: forceLiveComboTest || hasForcedConnection,
+    ignoreCircuitBreaker:
+      forceLiveComboTest || (hasForcedConnection && !isAgentBridgeRoutingContext),
+    ignoreModelCooldown:
+      forceLiveComboTest || (hasForcedConnection && !isAgentBridgeRoutingContext),
     providerProfile,
     ...(bypassReason ? { bypassReason } : {}),
   });
@@ -1917,7 +1997,8 @@ async function handleSingleModelChat(
       try {
         execution = await dispatchChatWithAffinityEviction(
           {
-            bypassCircuitBreaker: forceLiveComboTest || hasForcedConnection,
+            bypassCircuitBreaker:
+              forceLiveComboTest || (hasForcedConnection && !isAgentBridgeRoutingContext),
             breaker,
             body: requestBody,
             provider,
@@ -2204,7 +2285,11 @@ async function handleSingleModelChat(
       // Combo targets never emergency-hop: the combo is the operator's fallback policy
       // (target-level orchestration plus the global fallback #689 after it), and a
       // per-target hop burns extra upstream calls against exhausted providers (#1731).
-      if (!runtimeOptions.emergencyFallbackTried && !comboName) {
+      if (
+        !runtimeOptions.isAgentBridgeRoutingContext &&
+        !runtimeOptions.emergencyFallbackTried &&
+        !comboName
+      ) {
         const fallbackDecision = shouldUseFallback(
           Number(result.status || 0),
           String(result.error || ""),
