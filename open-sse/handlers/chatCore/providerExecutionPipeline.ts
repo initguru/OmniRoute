@@ -189,6 +189,26 @@ async function toOutcome(
   } catch {
     // keep statusText
   }
+  const errorPayload =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as { error?: unknown; code?: unknown; type?: unknown })
+      : null;
+  const nestedError =
+    errorPayload?.error && typeof errorPayload.error === "object" && !Array.isArray(errorPayload.error)
+      ? (errorPayload.error as { code?: unknown; type?: unknown })
+      : null;
+  const upstreamErrorCode =
+    typeof nestedError?.code === "string"
+      ? nestedError.code
+      : typeof errorPayload?.code === "string"
+        ? errorPayload.code
+        : undefined;
+  const upstreamErrorType =
+    typeof nestedError?.type === "string"
+      ? nestedError.type
+      : typeof errorPayload?.type === "string"
+        ? errorPayload.type
+        : undefined;
   const restatement = applyStatusRestatement({
     provider,
     status,
@@ -199,7 +219,10 @@ async function toOutcome(
   const result = createErrorResult(
     restatement.status,
     message,
-    restatement.retryAfterMs
+    restatement.retryAfterMs,
+    upstreamErrorCode,
+    upstreamErrorType,
+    body
   );
   return {
     kind: "error",
