@@ -16,7 +16,11 @@ import { decideCertMigration } from "./cert/migration.ts";
 import { ALL_TARGETS } from "./targets/index.ts";
 import { detectAgent } from "./detection/index.ts";
 import type { AgentId, DetectionResult, MitmTarget } from "./types.ts";
-import { getAllAgentBridgeStates } from "@/lib/db/agentBridgeState.ts";
+import {
+  getAgentBridgeAntigravityConnection,
+  getAllAgentBridgeStates,
+} from "@/lib/db/agentBridgeState.ts";
+import { rotateAgentBridgeRoutingContextSecret } from "./agentBridgeRoutingContext.ts";
 import { getUserBypassPatterns } from "@/lib/db/agentBridgeBypass.ts";
 import { getGheCopilotHosts } from "@/lib/db/providers.ts";
 import { configureUpstreamCa } from "./upstreamTrust.ts";
@@ -611,6 +615,11 @@ async function startMitmInternal(
     }
   }
 
+  const antigravityConnectionId = await getAgentBridgeAntigravityConnection("antigravity");
+  const agentBridgeRoutingContextSecret = antigravityConnectionId
+    ? rotateAgentBridgeRoutingContextSecret()
+    : "";
+
   serverProcess = spawn(process.execPath, [resolveMitmServerPath()], {
     windowsHide: true,
     env: {
@@ -618,6 +627,8 @@ async function startMitmInternal(
       ROUTER_API_KEY: apiKey,
       MITM_LOCAL_PORT: String(port),
       INSPECTOR_INTERNAL_INGEST_TOKEN: ingestToken,
+      AGENT_BRIDGE_ANTIGRAVITY_CONNECTION_ID: antigravityConnectionId || "",
+      AGENT_BRIDGE_ROUTING_CONTEXT_SECRET: agentBridgeRoutingContextSecret,
       // #6684: tell the spawned server.cjs which cert model this run resolved
       // to (Step 1 above) so its own gate can't drift from manager.ts's
       // migration decision.

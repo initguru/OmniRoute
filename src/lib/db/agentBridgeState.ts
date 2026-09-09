@@ -38,8 +38,7 @@ export function getAllAgentBridgeStates(): AgentBridgeStateRow[] {
 export function getAgentBridgeState(agentId: string): AgentBridgeStateRow | null {
   const db = getDbInstance();
   const row = db.prepare("SELECT * FROM agent_bridge_state WHERE agent_id = ?").get(agentId) as
-    | AgentBridgeStateDbRow
-    | undefined;
+    AgentBridgeStateDbRow | undefined;
   return row ? mapRow(row) : null;
 }
 
@@ -94,6 +93,71 @@ export function upsertAgentBridgeState(
       ...values
     );
   }
+}
+
+function isEligibleAntigravityConnection(connectionId: string): boolean {
+  const db = getDbInstance();
+  const row = db
+    .prepare(
+      `SELECT provider, is_active, provider_specific_data
+       FROM provider_connections
+       WHERE id = ?`
+    )
+    .get(connectionId) as
+    | {
+        provider: string | null;
+        is_active: number;
+        provider_specific_data: string | null;
+      }
+    | undefined;
+  if (!row || row.is_active !== 1 || !["antigravity", "agy"].includes(row.provider || "")) {
+    return false;
+  }
+  try {
+    const data = row.provider_specific_data ? JSON.parse(row.provider_specific_data) : null;
+    return data?.clientProfile === "cli" || data?.clientProfile === "ide";
+  } catch {
+    return false;
+  }
+}
+
+export async function setAgentBridgeAntigravityConnection(
+  agentId: string,
+  connectionId: string
+): Promise<void> {
+  if (agentId !== "antigravity" || !isEligibleAntigravityConnection(connectionId)) {
+    throw new Error("AgentBridge requires an eligible Antigravity connection");
+  }
+  const db = getDbInstance();
+  db.prepare(
+    `INSERT INTO agent_bridge_antigravity_connections (agent_id, connection_id, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(agent_id) DO UPDATE SET
+       connection_id = excluded.connection_id,
+       updated_at = excluded.updated_at`
+  ).run(agentId, connectionId);
+}
+
+export async function getAgentBridgeAntigravityConnection(agentId: string): Promise<string | null> {
+  if (agentId !== "antigravity") return null;
+  const db = getDbInstance();
+  const row = db
+    .prepare("SELECT connection_id FROM agent_bridge_antigravity_connections WHERE agent_id = ?")
+    .get(agentId) as { connection_id: string } | undefined;
+  if (!row || !isEligibleAntigravityConnection(row.connection_id)) return null;
+  return row.connection_id;
+}
+
+export async function resolveVerifiedAgentBridgeAntigravityConnection({
+  agentId,
+  connectionId,
+}: {
+  agentId: string;
+  connectionId: string | null;
+}): Promise<string | null> {
+  if (!connectionId || !isEligibleAntigravityConnection(connectionId)) return null;
+  const boundConnectionId = await getAgentBridgeAntigravityConnection(agentId);
+  return boundConnectionId === connectionId ? connectionId : null;
 }
 
 export function setLastStarted(agentId: string, ts: string): void {
