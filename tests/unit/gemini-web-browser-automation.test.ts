@@ -87,9 +87,10 @@ function createMockPage(options: MockPageOptions = {}) {
         responseListeners.delete(listener);
       }
     },
+    waitForTimeout: async (_ms: number) => {},
     locator(selector: string) {
       // Mode picker trigger
-      if (selector.includes("aria-label*='Open mode picker, currently '")) {
+      if (selector.includes("aria-label*='Open mode picker'")) {
         return {
           first: () => this.locator(selector),
           count: async () => 1,

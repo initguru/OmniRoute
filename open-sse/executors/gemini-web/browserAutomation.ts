@@ -46,9 +46,9 @@ export interface GeminiDeepThinkUiStateMachineOptions {
 
 // Selectors derived from tests/fixtures/gemini-web/deep-think-observed-ai-ultra.json
 export const COMPOSER_SELECTOR = ".ql-editor, [contenteditable='true']";
-export const MODE_PICKER_TRIGGER_SELECTOR = "button[aria-label*='Open mode picker, currently ' i]";
+export const MODE_PICKER_TRIGGER_SELECTOR = "button[aria-label*='Open mode picker' i]";
 export const PRO_MENU_ITEM_SELECTOR =
-  "[role='menuitem'][data-test-id='bard-mode-option-9d8ca3786ebdfbea'], [role='menuitem']:has-text('3.1 Pro')";
+  "[role='menuitem'][data-test-id='bard-mode-option-9d8ca3786ebdfbea'], [role='menuitem']:has-text('3.1 Pro'), [role='menuitem']:has-text('Pro')";
 export const DEEP_THINK_TOGGLE_SELECTOR =
   "[role='menuitem']:has-text('Deep Think'), button:has-text('Deep Think')";
 
@@ -186,9 +186,16 @@ export async function runGeminiDeepThinkUiStateMachine(
 
     if (!isProSelected) {
       await modePicker.click();
+      // Allow menu animation/rendering to settle
+      await page.waitForTimeout(500);
 
       const proItem = page.locator(PRO_MENU_ITEM_SELECTOR).first();
-      const proCount = await proItem.count();
+      let proCount = await proItem.count();
+      if (proCount === 0) {
+        // Retry with a short wait in case the menu animation is delayed
+        await page.waitForTimeout(1000);
+        proCount = await proItem.count();
+      }
       if (proCount === 0) {
         throw new GeminiWebUiStateError(
           "gemini_deep_think_unavailable",
