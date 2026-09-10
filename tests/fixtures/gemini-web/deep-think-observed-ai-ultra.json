@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0.0",
+  "provenance": {
+    "captureDate": "2026-09-10",
+    "origin": "https://gemini.google.com/app",
+    "locale": "en-US",
+    "accountTier": "Google AI Ultra (requires active __Secure-1PSID and __Secure-1PSIDTS)",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+  },
+  "locators": {
+    "composer": {
+      "selector": ".ql-editor, [contenteditable='true']",
+      "role": "textbox",
+      "expectedAriaLabelRegex": "prompt for Gemini"
+    },
+    "modePickerTrigger": {
+      "selector": "button[aria-label*='Open mode picker, currently ' i]",
+      "role": "button",
+      "ariaLabelPrefix": "Open mode picker, currently "
+    },
+    "menuContainer": {
+      "selector": "[role='menu']",
+      "itemSelector": "gem-menu-item[role='menuitem']"
+    },
+    "proMenuItem": {
+      "dataTestId": "bard-mode-option-9d8ca3786ebdfbea",
+      "text": "3.1 Pro",
+      "role": "menuitem",
+      "activeAttribute": "data-active",
+      "disabledAttribute": "aria-disabled"
+    },
+    "deepThinkToggle": {
+      "role": "menuitem",
+      "textRegex": "Deep Think",
+      "activeAttribute": "data-active",
+      "disabledAttribute": "aria-disabled",
+      "fallbackAriaChecked": "aria-checked"
+    }
+  },
+  "verifiedBehaviors": {
+    "proDisabledWhenLoggedOut": {
+      "attribute": "aria-disabled",
+      "expectedValue": "true",
+      "contractOutcome": "gemini_deep_think_unavailable"
+    },
+    "proSelectedPostcondition": {
+      "triggerAriaLabelIncludes": "currently 3.1 Pro"
+    }
+  }
+}
