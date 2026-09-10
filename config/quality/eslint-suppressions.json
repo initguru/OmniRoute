@@ -21,7 +21,7 @@
   },
   "open-sse/config/providers/registry/claude/index.ts": {
     "@typescript-eslint/no-unused-vars": {
-      "count": 7
+      "count": 6
     }
   },
   "open-sse/config/providers/registry/vertex/index.ts": {
@@ -42,11 +42,6 @@
   "open-sse/config/rerankRegistry.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
-    }
-  },
-  "open-sse/executors/antigravity.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 2
     }
   },
   "open-sse/executors/awsPollyTts.ts": {
@@ -225,11 +220,6 @@
       "count": 1
     }
   },
-  "open-sse/handlers/imageGeneration.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 6
-    }
-  },
   "open-sse/handlers/musicGeneration.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
@@ -386,17 +376,7 @@
       "count": 1
     }
   },
-  "open-sse/services/antigravityClientProfile.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
   "open-sse/services/antigravityIdentity.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
-  "open-sse/services/antigravityProjectBootstrap.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
     }
@@ -470,11 +450,6 @@
   "open-sse/services/codexUsageQuotas.ts": {
     "no-restricted-syntax": {
       "count": 1
-    }
-  },
-  "open-sse/services/combo.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 21
     }
   },
   "open-sse/services/combo/providerWildcard.ts": {
@@ -608,6 +583,11 @@
       "count": 3
     }
   },
+  "open-sse/services/systemPrompt.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 5
+    }
+  },
   "open-sse/services/taskAwareRouter.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
@@ -619,11 +599,6 @@
     }
   },
   "open-sse/services/tierResolver.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
-  "open-sse/services/tlsClientBase.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
     }
@@ -949,11 +924,6 @@
   "src/app/(dashboard)/dashboard/providers/[id]/hooks/useModelVisibilityHandlers.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 2
-    }
-  },
-  "src/app/(dashboard)/dashboard/providers/[id]/hooks/useProviderConnections.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/app/(dashboard)/dashboard/providers/page.tsx": {
@@ -1292,11 +1262,6 @@
   "src/app/api/v1/models/catalog.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 10
-    }
-  },
-  "src/app/api/v1/models/catalogCache.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/app/api/v1/models/catalogOpenrouter.ts": {
@@ -1820,11 +1785,6 @@
   "src/lib/usage/costCalculator.ts": {
     "no-restricted-syntax": {
       "count": 1
-    }
-  },
-  "src/lib/usage/fetcher.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 7
     }
   },
   "src/lib/usage/internalUsageCommand.ts": {
@@ -2740,7 +2700,7 @@
   },
   "tests/unit/build/check-licenses.test.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 5
+      "count": 4
     }
   },
   "tests/unit/bypass-handler.test.ts": {
@@ -2806,11 +2766,6 @@
       "count": 10
     }
   },
-  "tests/unit/chat-helpers.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 13
-    }
-  },
   "tests/unit/chat-rate-limit-body-lock.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
@@ -2849,7 +2804,7 @@
   },
   "tests/unit/chatcore-translation-paths.test.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 31
+      "count": 30
     }
   },
   "tests/unit/check-docs-symbols.test.ts": {
@@ -3335,7 +3290,7 @@
   },
   "tests/unit/combo-routing-engine.test.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 268
+      "count": 267
     }
   },
   "tests/unit/combo-same-provider-cascade.test.ts": {
@@ -3851,11 +3806,6 @@
   },
   "tests/unit/executor-agy.test.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "tests/unit/executor-antigravity.test.ts": {
-    "@typescript-eslint/no-unused-vars": {
       "count": 1
     }
   },
@@ -5349,31 +5299,8 @@
       "count": 1
     }
   },
-  "tests/unit/ui/use-improve-prompt.test.tsx": {
-    "react-hooks/immutability": {
-      "count": 1
-    }
-  },
-  "tests/unit/ui/use-presets.test.tsx": {
-    "react-hooks/immutability": {
-      "count": 1
-    }
-  },
   "tests/unit/ui/use-stream-metrics.test.tsx": {
     "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    },
-    "react-hooks/immutability": {
-      "count": 1
-    }
-  },
-  "tests/unit/ui/use-structured-output.test.tsx": {
-    "react-hooks/immutability": {
-      "count": 1
-    }
-  },
-  "tests/unit/ui/use-tools-builder.test.tsx": {
-    "react-hooks/immutability": {
       "count": 1
     }
   },
@@ -5461,6 +5388,11 @@
   "tests/unit/video-custom-provider-route.test.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
+    }
+  },
+  "tests/unit/volcengine-plan-binding-upsert.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
     }
   },
   "tests/unit/vscode-token-routes.test.ts": {
