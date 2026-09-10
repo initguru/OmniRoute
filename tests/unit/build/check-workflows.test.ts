@@ -365,3 +365,89 @@ test("#7307 quality.yml keeps the advisory production build (disabled: hosted 7 
     /remove\s+# continue-on-error after the production-build signal is stable/
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// nightly-antigravity-canary.yml — isolated scheduled external canary workflow
+// ─────────────────────────────────────────────────────────────────────────────
+
+const canaryWorkflowPath = new URL(
+  "../../../.github/workflows/nightly-antigravity-canary.yml",
+  import.meta.url
+);
+const packageJsonPath = new URL("../../../package.json", import.meta.url);
+
+function readCanaryWorkflow(): string {
+  return fs.readFileSync(canaryWorkflowPath, "utf8");
+}
+
+function readPackageJson(): { scripts: Record<string, string> } {
+  return JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+}
+
+test("package.json registers antigravity canary check and issue scripts", () => {
+  const pkg = readPackageJson();
+  assert.ok(
+    pkg.scripts["check:antigravity-canary"],
+    "check:antigravity-canary script must be defined in package.json"
+  );
+  assert.match(
+    pkg.scripts["check:antigravity-canary"],
+    /scripts\/check\/check-antigravity-external-canary\.ts/
+  );
+  assert.ok(
+    pkg.scripts["check:antigravity-canary:issue"],
+    "check:antigravity-canary:issue script must be defined in package.json"
+  );
+  assert.match(
+    pkg.scripts["check:antigravity-canary:issue"],
+    /scripts\/check\/update-antigravity-canary-issue\.mjs/
+  );
+});
+
+test("nightly-antigravity-canary.yml workflow meets structural and isolation requirements", () => {
+  assert.ok(
+    fs.existsSync(canaryWorkflowPath),
+    ".github/workflows/nightly-antigravity-canary.yml must exist"
+  );
+  const source = readCanaryWorkflow();
+
+  // 1. Trigger restrictions: off-peak cron + workflow_dispatch ONLY. Forbidden: push, PR, PR-target, workflow_run
+  assert.match(source, /schedule:\s*\n\s*-\s*cron:\s*["']17 3 \* \* \*["']/);
+  assert.match(source, /workflow_dispatch:/);
+  assert.match(source, /profile:/);
+  assert.match(source, /type:\s*choice/);
+  assert.match(source, /options:\s*\n\s*-\s*all\s*\n\s*-\s*cli\s*\n\s*-\s*ide/);
+
+  // Assert forbidden triggers do NOT exist
+  assert.doesNotMatch(source, /\n\s*push:\s*\n/);
+  assert.doesNotMatch(source, /\n\s*pull_request:\s*\n/);
+  assert.doesNotMatch(source, /\n\s*pull_request_target:\s*\n/);
+  assert.doesNotMatch(source, /\n\s*workflow_run:\s*\n/);
+
+  // 2. Runner & Environment isolation: runs-on: [self-hosted, antigravity-canary]
+  assert.match(source, /runs-on:\s*\[\s*self-hosted\s*,\s*antigravity-canary\s*\]/);
+  assert.doesNotMatch(source, /runs-on:\s*ubuntu-latest/);
+
+  // 3. Matrix execution: fail-fast: false, profile: [cli, ide]
+  assert.match(source, /fail-fast:\s*false/);
+  assert.match(source, /profile:\s*\[\s*cli\s*,\s*ide\s*\]/);
+
+  // 4. Artifact upload (always, 90 days retention, result.json, result.md)
+  assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
+  assert.match(source, /retention-days:\s*90/);
+  assert.match(source, /result\.json/);
+  assert.match(source, /result\.md/);
+
+  // 5. Living Issue manager update step
+  assert.match(source, /update-antigravity-canary-issue\.mjs/);
+
+  // 6. Hard Rule #13 compliance: no ${{ ... }} inside run: steps
+  const runBlocks = source.match(/run:\s*\|[\s\S]*?(?=\n\s*(?:-\s*name:|\w+:|\Z))/g) || [];
+  for (const block of runBlocks) {
+    assert.doesNotMatch(
+      block,
+      /\$\{\{\s*(?:github|matrix|inputs|env|steps|secrets)\.[^}]+\}\}/,
+      `Hard Rule #13 violation: raw GitHub expression embedded inside run block: ${block.slice(0, 80)}...`
+    );
+  }
+});

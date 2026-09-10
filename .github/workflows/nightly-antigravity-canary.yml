@@ -1,0 +1,205 @@
+name: Nightly Antigravity Canary
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Client profile to verify"
+        type: choice
+        options:
+          - all
+          - cli
+          - ide
+        default: all
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    name: Canary (${{ matrix.profile }})
+    if: github.event_name == 'schedule' || github.event.inputs.profile == 'all' || github.event.inputs.profile == '' || github.event.inputs.profile == matrix.profile
+    runs-on: [self-hosted, antigravity-canary]
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [cli, ide]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Preflight and canary execution
+        id: canary
+        env:
+          PROFILE: ${{ matrix.profile }}
+          ARTIFACT_DIR: _artifacts/antigravity-canary/${{ matrix.profile }}
+        run: |
+          mkdir -p "$ARTIFACT_DIR"
+          RESULT_JSON="$ARTIFACT_DIR/result.json"
+          RESULT_MD="$ARTIFACT_DIR/result.md"
+          REPORT_JSON="$ARTIFACT_DIR/report.json"
+
+          set +e
+          node --import tsx/esm scripts/check/check-antigravity-external-canary.ts \
+            --profile "$PROFILE" \
+            --output "$REPORT_JSON" > "$RESULT_JSON" 2>&1
+          CANARY_EXIT=$?
+          set -e
+
+          echo "canary_exit_code=$CANARY_EXIT" >> "$GITHUB_OUTPUT"
+
+          STATUS=$(node -e '
+            const fs = require("fs");
+            try {
+              const data = JSON.parse(fs.readFileSync(process.env.RESULT_JSON, "utf8"));
+              console.log(data.status || "error");
+            } catch {
+              console.log("error");
+            }
+          ' 2>/dev/null || echo "error")
+
+          REASON=$(node -e '
+            const fs = require("fs");
+            try {
+              const data = JSON.parse(fs.readFileSync(process.env.RESULT_JSON, "utf8"));
+              console.log(data.reasonCode || "unknown");
+            } catch {
+              console.log("unknown");
+            }
+          ' 2>/dev/null || echo "unknown")
+
+          MESSAGE=$(node -e '
+            const fs = require("fs");
+            try {
+              const data = JSON.parse(fs.readFileSync(process.env.RESULT_JSON, "utf8"));
+              console.log(data.message || "");
+            } catch {
+              console.log("");
+            }
+          ' 2>/dev/null || echo "")
+
+          DIFF_COUNT=$(node -e '
+            const fs = require("fs");
+            try {
+              const data = JSON.parse(fs.readFileSync(process.env.RESULT_JSON, "utf8"));
+              console.log(data.differenceCount ?? 0);
+            } catch {
+              console.log("0");
+            }
+          ' 2>/dev/null || echo "0")
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+
+          cat <<EOF > "$RESULT_MD"
+          # Antigravity Canary Execution Result
+
+          - **Profile**: $PROFILE
+          - **Status**: $STATUS
+          - **Exit Code**: $CANARY_EXIT
+          - **Reason Code**: $REASON
+          - **Message**: $MESSAGE
+          - **Difference Count**: $DIFF_COUNT
+          - **Timestamp**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: antigravity-canary-${{ matrix.profile }}
+          path: |
+            _artifacts/antigravity-canary/${{ matrix.profile }}/result.json
+            _artifacts/antigravity-canary/${{ matrix.profile }}/result.md
+            _artifacts/antigravity-canary/${{ matrix.profile }}/report.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Update living issue
+        if: always()
+        env:
+          PROFILE: ${{ matrix.profile }}
+          STATUS: ${{ steps.canary.outputs.status }}
+          REASON: ${{ steps.canary.outputs.reason }}
+          CANARY_EXIT: ${{ steps.canary.outputs.canary_exit_code }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESULT_JSON: _artifacts/antigravity-canary/${{ matrix.profile }}/result.json
+          REPORT_JSON: _artifacts/antigravity-canary/${{ matrix.profile }}/report.json
+        run: |
+          OUTCOME="blocked"
+          if [ "$STATUS" = "pass" ]; then
+            OUTCOME="pass"
+          elif [ "$STATUS" = "drift" ]; then
+            OUTCOME="drift"
+          elif [ "$STATUS" = "blocked" ]; then
+            OUTCOME="blocked"
+          else
+            OUTCOME="blocked"
+          fi
+
+          REPORT_ARG=()
+          if [ -f "$REPORT_JSON" ]; then
+            REPORT_ARG=(--report "$REPORT_JSON")
+          fi
+
+          DETAILS="Antigravity canary completed with status: $STATUS (exit: $CANARY_EXIT, reason: $REASON)"
+          if [ -f "$RESULT_JSON" ]; then
+            DETAILS=$(node -e '
+              const fs = require("fs");
+              try {
+                const d = JSON.parse(fs.readFileSync(process.env.RESULT_JSON, "utf8"));
+                console.log(d.message || process.env.DETAILS);
+              } catch {
+                console.log(process.env.DETAILS);
+              }
+            ')
+          fi
+
+          node scripts/check/update-antigravity-canary-issue.mjs \
+            --profile "$PROFILE" \
+            --outcome "$OUTCOME" \
+            --reason "$REASON" \
+            --details "$DETAILS" \
+            "${REPORT_ARG[@]}"
+
+      - name: Final status gate
+        env:
+          STATUS: ${{ steps.canary.outputs.status }}
+          EXIT_CODE: ${{ steps.canary.outputs.canary_exit_code }}
+          PROFILE: ${{ matrix.profile }}
+          REASON: ${{ steps.canary.outputs.reason }}
+        run: |
+          echo "Evaluating final status gate for $PROFILE (status: $STATUS, exit: $EXIT_CODE, reason: $REASON)"
+          if [ "$STATUS" = "pass" ] && [ "$EXIT_CODE" -eq 0 ]; then
+            echo "Canary passed successfully."
+            exit 0
+          elif [ "$STATUS" = "drift" ]; then
+            echo "::error::Antigravity canary detected wire drift for profile: $PROFILE"
+            exit 10
+          elif [ "$STATUS" = "blocked" ]; then
+            echo "Antigravity canary is blocked for profile: $PROFILE (reason: $REASON)."
+            if [ "${CANARY_FAIL_ON_BLOCKED:-0}" = "1" ]; then
+              echo "::error::Canary blocked treated as failure by policy (CANARY_FAIL_ON_BLOCKED=1)."
+              exit 20
+            fi
+            echo "Blocked status handled cleanly under policy (pass exit 0)."
+            exit 0
+          else
+            echo "::error::Antigravity canary execution error (status: $STATUS, exit: $EXIT_CODE)"
+            exit 1
+          fi

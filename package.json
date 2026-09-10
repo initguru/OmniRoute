@@ -226,6 +226,8 @@
     "check:codeql-ratchet": "node scripts/check/check-codeql-ratchet.mjs",
     "check:secrets": "node scripts/check/check-secrets.mjs",
     "check:workflows": "node scripts/check/check-workflows.mjs",
+    "check:antigravity-canary": "node --import tsx/esm scripts/check/check-antigravity-external-canary.ts",
+    "check:antigravity-canary:issue": "node scripts/check/update-antigravity-canary-issue.mjs",
     "quality:collect": "node scripts/quality/collect-metrics.mjs",
     "quality:ratchet": "node scripts/quality/check-quality-ratchet.mjs",
     "quality:headroom": "node scripts/quality/baseline-headroom.mjs",
