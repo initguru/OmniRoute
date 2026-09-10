@@ -317,6 +317,34 @@ test("resolveModelTestTimeoutMs gives zai-web checks up to 60 seconds", () => {
   assert.equal(resolveModelTestTimeoutMs("zai-web", "zai-web/glm-5.3-flash", 90_000), 90_000);
 });
 
+test("resolveModelTestTimeoutMs extends gemini-deep-think checks to 120 seconds", () => {
+  assert.equal(resolveModelTestTimeoutMs("gemini-web", "gemini-deep-think", 30_000), 120_000);
+  assert.equal(resolveModelTestTimeoutMs("gweb", "gemini-deep-think", 30_000), 120_000);
+  assert.equal(
+    resolveModelTestTimeoutMs("gemini-web", "gemini-web/gemini-deep-think", 30_000),
+    120_000
+  );
+  assert.equal(resolveModelTestTimeoutMs("gweb", "gweb/gemini-deep-think", 30_000), 120_000);
+  assert.equal(resolveModelTestTimeoutMs("GEMINI-WEB", "gemini-deep-think", 30_000), 120_000);
+  assert.equal(resolveModelTestTimeoutMs("GWEB", "gemini-deep-think", 30_000), 120_000);
+  assert.equal(resolveModelTestTimeoutMs("gemini-web", "gemini-deep-think", 150_000), 150_000);
+});
+
+test("resolveModelTestTimeoutMs keeps default timeout for ordinary gemini-web models", () => {
+  assert.equal(resolveModelTestTimeoutMs("gemini-web", "gemini-3.1-pro", 30_000), 30_000);
+  assert.equal(resolveModelTestTimeoutMs("gweb", "gemini-3.1-pro", 30_000), 30_000);
+  assert.equal(
+    resolveModelTestTimeoutMs("gemini-web", "gemini-web/gemini-3.1-pro", 30_000),
+    30_000
+  );
+});
+
+test("resolveModelTestTimeoutMs extends nvidia provider checks to 180 seconds", () => {
+  assert.equal(resolveModelTestTimeoutMs("nvidia", "meta/llama-3.1-70b-instruct", 30_000), 180_000);
+  assert.equal(resolveModelTestTimeoutMs("NVIDIA", "any-model", 30_000), 180_000);
+  assert.equal(resolveModelTestTimeoutMs("nvidia", "any-model", 200_000), 200_000);
+});
+
 // ---------------------------------------------------------------------------
 // classifyTestErrorQuota — #9511 quota classification for Test All auto-hide.
 // Distinguishes three outcomes:
