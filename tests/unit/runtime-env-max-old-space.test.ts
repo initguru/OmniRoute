@@ -37,3 +37,11 @@ test("#2939 clamps out-of-range values to the default", () => {
 test("#2939 a custom fallback is respected", () => {
   assert.equal(resolveMaxOldSpaceMb(undefined, 1024), 1024);
 });
+
+test("run-standalone honors calibrated host RAM fallback when OMNIROUTE_MEMORY_MB is unset", async () => {
+  const { calibrateHeapFallbackMb } = await import("../../scripts/build/runtime-env.mjs");
+  const ram16Gb = 16 * 1024 * 1024 * 1024;
+  const calibrated = calibrateHeapFallbackMb(ram16Gb);
+  assert.equal(calibrated, 4096);
+  assert.equal(resolveMaxOldSpaceMb(undefined, calibrated), 4096);
+});
