@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   buildAntigravityCompatibilityEvent,
+  createAntigravityAttemptBaseline,
+  assessAntigravityCompatibilityEvent,
+  logAntigravityCompatibilityAssessment,
+  _resetAntigravityDriftDedupeForTest,
   type AntigravityCompatibilityEvent,
 } from "../../open-sse/services/antigravityCompatibilityDiagnostics.ts";
 import {
@@ -418,4 +422,209 @@ test("credits retry classifies non-429 response status without exposing its body
       /disabled in this account|upstream|violation of policy/
     );
   }
+});
+
+test("createAntigravityAttemptBaseline retains only digests and structural metadata without raw data", () => {
+  const event = buildEvent(
+    {
+      model: "gemini-3.1-pro",
+      project: "secret-project",
+      requestId: "secret-session",
+      requestType: "agent",
+      request: {
+        contents: [{ role: "user", parts: [{ text: "secret prompt text" }] }],
+        tools: [],
+      },
+    },
+    ["content-type", "authorization"]
+  );
+
+  const baseline = createAntigravityAttemptBaseline(event);
+
+  assert.equal(baseline.profile, event.profile);
+  assert.equal(baseline.contractId, event.contractId);
+  assert.equal(baseline.surface, event.surface);
+  assert.equal(baseline.requestType, event.requestType);
+  assert.equal(baseline.bodyDigest, event.redactedBodyDigest);
+  assert.equal(baseline.headerDigest, event.redactedHeaderDigest);
+
+  const serialized = JSON.stringify(baseline);
+  assert.doesNotMatch(serialized, /secret-project|secret-session|secret prompt text|authorization/i);
+  assert.deepEqual(Object.keys(baseline).sort(), [
+    "bodyDigest",
+    "contractId",
+    "headerDigest",
+    "profile",
+    "requestType",
+    "surface",
+  ]);
+});
+
+test("assessAntigravityCompatibilityEvent classifies retry body drift on retry attempt", () => {
+  const initialEvent = buildEvent(
+    { model: "gemini-3.1-pro", request: { contents: [{ role: "user", parts: [{ text: "first" }] }] } },
+    ["content-type"]
+  );
+  const baseline = createAntigravityAttemptBaseline(initialEvent);
+
+  // retry event with different structure (e.g. 2 contents instead of 1)
+  const retryEvent: AntigravityCompatibilityEvent = {
+    ...initialEvent,
+    attempt: 2,
+    retryDecision: "bounded_retry",
+    redactedBodyDigest: "sha256:different00000000000000000000000000000000000000000000000000000000",
+  };
+
+  const assessment = assessAntigravityCompatibilityEvent(retryEvent, baseline);
+  assert.equal(assessment.driftType, "retry_body_drift");
+  assert.equal(assessment.shouldWarn, true);
+  assert.equal(assessment.event, retryEvent);
+  assert.equal(assessment.baseline, baseline);
+});
+
+test("assessAntigravityCompatibilityEvent does not flag normal project-header retry as body drift", () => {
+  const initialEvent = buildAntigravityCompatibilityEvent({
+    context: CONTEXT,
+    surface: "content",
+    requestType: "agent",
+    attempt: 1,
+    errorClass: "auth_failure",
+    retryDecision: "project_header_retry",
+    bodyShape: { model: "gemini-3.1-pro", request: { contents: [] } },
+    headerNames: ["content-type", "x-goog-user-project"],
+    durationMs: 20,
+  });
+  const baseline = createAntigravityAttemptBaseline(initialEvent);
+
+  // Second attempt in project header retry removes x-goog-user-project (which is sensitive, so excluded from digest)
+  const retryEvent = buildAntigravityCompatibilityEvent({
+    context: CONTEXT,
+    surface: "content",
+    requestType: "agent",
+    attempt: 2,
+    errorClass: null,
+    retryDecision: "project_header_retry",
+    bodyShape: { model: "gemini-3.1-pro", request: { contents: [] } },
+    headerNames: ["content-type"],
+    durationMs: 15,
+  });
+
+  const assessment = assessAntigravityCompatibilityEvent(retryEvent, baseline);
+  assert.notEqual(assessment.driftType, "retry_body_drift");
+  assert.equal(assessment.shouldWarn, false);
+});
+
+test("assessAntigravityCompatibilityEvent classifies version drift and schema rejection", () => {
+  const versionDriftEvent: AntigravityCompatibilityEvent = {
+    ...buildEvent({ model: "gemini-3.1-pro", request: { contents: [] } }),
+    versionState: "drift",
+    errorClass: null,
+  };
+  const assessmentVersion = assessAntigravityCompatibilityEvent(versionDriftEvent);
+  assert.equal(assessmentVersion.driftType, "version_drift");
+  assert.equal(assessmentVersion.shouldWarn, true);
+
+  const schemaRejectionEvent: AntigravityCompatibilityEvent = {
+    ...buildEvent({ model: "gemini-3.1-pro", request: { contents: [] } }),
+    errorClass: "schema_rejection",
+  };
+  const assessmentSchema = assessAntigravityCompatibilityEvent(schemaRejectionEvent);
+  assert.equal(assessmentSchema.driftType, "schema_rejection");
+  assert.equal(assessmentSchema.shouldWarn, true);
+});
+
+test("assessAntigravityCompatibilityEvent classifies contract_unverified when unverified/synthetic", () => {
+  const unverifiedEvent: AntigravityCompatibilityEvent = {
+    ...buildEvent({ model: "gemini-3.1-pro", request: { contents: [] } }),
+    versionState: "unverified",
+    contractId: "antigravity-wire-cli-synthetic-v1",
+    errorClass: null,
+  };
+  const assessment = assessAntigravityCompatibilityEvent(unverifiedEvent);
+  assert.equal(assessment.driftType, "contract_unverified");
+  assert.equal(assessment.shouldWarn, false);
+});
+
+test("logAntigravityCompatibilityAssessment deduplicates warnings within TTL and enforces LRU cap", () => {
+  _resetAntigravityDriftDedupeForTest();
+  const warnLogs: string[] = [];
+  const log = {
+    debug: () => {},
+    warn: (tag: string, message: string) => {
+      if (tag === "AG_COMPATIBILITY_DRIFT") warnLogs.push(message);
+    },
+  };
+
+  const event: AntigravityCompatibilityEvent = {
+    ...buildEvent({ model: "gemini-3.1-pro", request: { contents: [] } }),
+    errorClass: "schema_rejection",
+  };
+  const assessment = assessAntigravityCompatibilityEvent(event);
+
+  // First call should warn
+  logAntigravityCompatibilityAssessment(log, assessment);
+  assert.equal(warnLogs.length, 1);
+  assert.match(warnLogs[0], /schema_rejection/);
+
+  // Immediate second call with identical assessment should be deduplicated
+  logAntigravityCompatibilityAssessment(log, assessment);
+  assert.equal(warnLogs.length, 1);
+
+  // 257 distinct keys should evict the oldest entry (cap 256)
+  for (let i = 0; i < 257; i++) {
+    const ev: AntigravityCompatibilityEvent = {
+      ...event,
+      contractId: `contract-${i}`,
+      redactedBodyDigest: `sha256:${i.toString(16).padStart(64, "0")}`,
+    };
+    logAntigravityCompatibilityAssessment(log, assessAntigravityCompatibilityEvent(ev));
+  }
+  // All 257 distinct events produced warnings
+  assert.equal(warnLogs.length, 1 + 257);
+
+  // Now the very first entry should have been evicted and can warn again
+  logAntigravityCompatibilityAssessment(log, assessment);
+  assert.equal(warnLogs.length, 1 + 257 + 1);
+});
+
+test("sendAntigravityRequest logs assessment warning when bounded retry exhibits body drift", async () => {
+  _resetAntigravityDriftDedupeForTest();
+  const warnLogs: string[] = [];
+  const debugLogs: string[] = [];
+  const log = {
+    debug: (_tag: string, msg: string) => {
+      debugLogs.push(msg);
+    },
+    warn: (tag: string, msg: string) => {
+      if (tag === "AG_COMPATIBILITY_DRIFT") warnLogs.push(msg);
+    },
+    info: () => {},
+    error: () => {},
+  } as unknown as ReturnType<typeof toSafeAntigravityLog>;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+
+  try {
+    // Retry attempt 1 (retryAttempt > 0)
+    await sendAntigravityRequest(
+      "antigravity",
+      "https://synthetic.invalid/content",
+      "gemini-2.5-flash",
+      { "content-type": "application/json" },
+      { project: "synthetic-project", request: { contents: [] }, requestType: "agent" },
+      CREDENTIALS,
+      true,
+      undefined,
+      log,
+      1,
+      CONTEXT
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // Under retryAttempt 1 with unchanged body, retryDecision is "bounded_retry" and initial baseline matches current attempt, so no body drift warning
+  assert.equal(warnLogs.length, 0);
+  assert.ok(debugLogs.some((msg) => msg.includes('"retryDecision":"bounded_retry"')));
 });

@@ -30,6 +30,9 @@ import type { AntigravityCredentials } from "../antigravity.ts";
 import {
   buildAntigravityCompatibilityEvent,
   logAntigravityCompatibilityEvent,
+  createAntigravityAttemptBaseline,
+  assessAntigravityCompatibilityEvent,
+  logAntigravityCompatibilityAssessment,
 } from "../../services/antigravityCompatibilityDiagnostics.ts";
 import { classifyAntigravityCompatibilityError } from "../../services/errorClassifier.ts";
 import { sanitizeErrorMessage } from "../../utils/error.ts";
@@ -432,6 +435,20 @@ export async function sendAntigravityRequest(
   let finalRetryDecision: "none" | "bounded_retry" | "project_header_retry" =
     retryAttempt > 0 ? "bounded_retry" : "none";
   let finalAttempt = Math.max(1, retryAttempt + 1);
+  const initialBaseline = createAntigravityAttemptBaseline(
+    buildAntigravityCompatibilityEvent({
+      context: resolvedContext,
+      provider,
+      surface: "content",
+      requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+      attempt: finalAttempt,
+      errorClass: null,
+      retryDecision: finalRetryDecision,
+      bodyShape: transformedBody,
+      headerNames: Object.keys(finalHeaders),
+      durationMs: 0,
+    })
+  );
   try {
     response = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
@@ -446,23 +463,25 @@ export async function sendAntigravityRequest(
       removeHeaderCaseInsensitive(retryHeaders, "x-goog-user-project");
       log.debug("RETRY", "403 with x-goog-user-project, retrying once without it");
       const projectHeaderBody = await readCompatibilityResponseBody(response);
-      logAntigravityCompatibilityEvent(
+      const projectHeaderEvent = buildAntigravityCompatibilityEvent({
+        context: resolvedContext,
+        provider,
+        surface: "content",
+        requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+        attempt: finalAttempt,
+        errorClass: classifyAntigravityCompatibilityError(
+          response.status,
+          projectHeaderBody,
+          provider
+        ),
+        retryDecision: "project_header_retry",
+        bodyShape: transformedBody,
+        headerNames: Object.keys(finalHeaders),
+        durationMs: Date.now() - startedAt,
+      });
+      logAntigravityCompatibilityAssessment(
         log,
-        buildAntigravityCompatibilityEvent({
-          context: resolvedContext,
-          surface: "content",
-          requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
-          attempt: finalAttempt,
-          errorClass: classifyAntigravityCompatibilityError(
-            response.status,
-            projectHeaderBody,
-            provider
-          ),
-          retryDecision: "project_header_retry",
-          bodyShape: transformedBody,
-          headerNames: Object.keys(finalHeaders),
-          durationMs: Date.now() - startedAt,
-        })
+        assessAntigravityCompatibilityEvent(projectHeaderEvent, initialBaseline)
       );
       await prl.captureCurrentProviderBody(url, retryHeaders, serializedRequest.bodyString, log);
       finalHeaders = retryHeaders;
@@ -478,20 +497,21 @@ export async function sendAntigravityRequest(
     }
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) throw signal?.reason ?? error;
-    logAntigravityCompatibilityEvent(
+    const transportEvent = buildAntigravityCompatibilityEvent({
+      context: resolvedContext,
+      provider,
+      surface: "content",
+      requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+      attempt: finalAttempt,
+      errorClass: "transport",
+      retryDecision: finalRetryDecision,
+      bodyShape: transformedBody,
+      headerNames: Object.keys(finalHeaders),
+      durationMs: Date.now() - startedAt,
+    });
+    logAntigravityCompatibilityAssessment(
       log,
-      buildAntigravityCompatibilityEvent({
-        context: resolvedContext,
-        provider,
-        surface: "content",
-        requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
-        attempt: finalAttempt,
-        errorClass: "transport",
-        retryDecision: finalRetryDecision,
-        bodyShape: transformedBody,
-        headerNames: Object.keys(finalHeaders),
-        durationMs: Date.now() - startedAt,
-      })
+      assessAntigravityCompatibilityEvent(transportEvent, initialBaseline)
     );
     throw error;
   }
@@ -515,22 +535,23 @@ export async function sendAntigravityRequest(
   }
 
   const responseBody = response.ok ? "" : await readCompatibilityResponseBody(response);
-  logAntigravityCompatibilityEvent(
+  const finalCompatibilityEvent = buildAntigravityCompatibilityEvent({
+    context: resolvedContext,
+    provider,
+    surface: "content",
+    requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
+    attempt: finalAttempt,
+    errorClass: response.ok
+      ? null
+      : classifyAntigravityCompatibilityError(response.status, responseBody, provider),
+    retryDecision: finalRetryDecision,
+    bodyShape: transformedBody,
+    headerNames: Object.keys(finalHeaders),
+    durationMs: Date.now() - startedAt,
+  });
+  logAntigravityCompatibilityAssessment(
     log,
-    buildAntigravityCompatibilityEvent({
-      context: resolvedContext,
-      provider,
-      surface: "content",
-      requestType: transformedBody.requestType === "image_gen" ? "image_gen" : "agent",
-      attempt: finalAttempt,
-      errorClass: response.ok
-        ? null
-        : classifyAntigravityCompatibilityError(response.status, responseBody, provider),
-      retryDecision: finalRetryDecision,
-      bodyShape: transformedBody,
-      headerNames: Object.keys(finalHeaders),
-      durationMs: Date.now() - startedAt,
-    })
+    assessAntigravityCompatibilityEvent(finalCompatibilityEvent, initialBaseline)
   );
 
   return { response, finalHeaders };

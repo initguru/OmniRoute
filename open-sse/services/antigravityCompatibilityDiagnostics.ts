@@ -189,3 +189,184 @@ export function logAntigravityCompatibilityEvent(
 ): void {
   log.debug?.("AG_COMPATIBILITY", JSON.stringify(event));
 }
+
+export type AntigravityAttemptBaseline = {
+  profile: "cli" | "ide";
+  contractId: string;
+  surface: AntigravityCompatibilityEvent["surface"];
+  requestType: AntigravityCompatibilityEvent["requestType"];
+  bodyDigest: string | null;
+  headerDigest: string | null;
+};
+
+export type AntigravityDriftType =
+  | "retry_body_drift"
+  | "version_drift"
+  | "schema_rejection"
+  | "contract_unverified"
+  | "none";
+
+export type AntigravityCompatibilityAssessment = {
+  driftType: AntigravityDriftType;
+  shouldWarn: boolean;
+  event: AntigravityCompatibilityEvent;
+  baseline: AntigravityAttemptBaseline | null;
+  reason: string;
+};
+
+export function createAntigravityAttemptBaseline(
+  event: AntigravityCompatibilityEvent
+): AntigravityAttemptBaseline {
+  return {
+    profile: event.profile,
+    contractId: event.contractId,
+    surface: event.surface,
+    requestType: event.requestType,
+    bodyDigest: event.redactedBodyDigest,
+    headerDigest: event.redactedHeaderDigest,
+  };
+}
+
+export function assessAntigravityCompatibilityEvent(
+  event: AntigravityCompatibilityEvent,
+  baseline?: AntigravityAttemptBaseline | null
+): AntigravityCompatibilityAssessment {
+  const resolvedBaseline = baseline ?? null;
+
+  // 1. retry_body_drift: 동일 sendAntigravityRequest 실행 내 retry (attempt > 1 또는 retryDecision !== "none")에서
+  // initial attempt와 body digest 불일치 시 분류.
+  const isRetry = event.attempt > 1 || event.retryDecision !== "none";
+  if (
+    isRetry &&
+    resolvedBaseline &&
+    resolvedBaseline.bodyDigest !== null &&
+    event.redactedBodyDigest !== null &&
+    resolvedBaseline.bodyDigest !== event.redactedBodyDigest
+  ) {
+    return {
+      driftType: "retry_body_drift",
+      shouldWarn: true,
+      event,
+      baseline: resolvedBaseline,
+      reason: `Retry body digest drift: initial=${resolvedBaseline.bodyDigest} current=${event.redactedBodyDigest}`,
+    };
+  }
+
+  // 2. version_drift: event.versionState === "drift" 시 분류.
+  if (event.versionState === "drift") {
+    return {
+      driftType: "version_drift",
+      shouldWarn: true,
+      event,
+      baseline: resolvedBaseline,
+      reason: `Observed client version is in drift state (observed=${event.observedVersion})`,
+    };
+  }
+
+  // 3. schema_rejection: errorClass === "schema_rejection" or "schema" 시 분류.
+  if (event.errorClass === "schema_rejection" || (event.errorClass as string) === "schema") {
+    return {
+      driftType: "schema_rejection",
+      shouldWarn: true,
+      event,
+      baseline: resolvedBaseline,
+      reason: `Upstream rejected request schema (profile=${event.profile}, surface=${event.surface})`,
+    };
+  }
+
+  // 4. contract_unverified: contract가 unverified/synthetic 상태일 때.
+  const isSyntheticContract =
+    event.contractId.includes("synthetic") || event.versionState === "unverified";
+  if (isSyntheticContract) {
+    return {
+      driftType: "contract_unverified",
+      shouldWarn: false,
+      event,
+      baseline: resolvedBaseline,
+      reason: `Contract unverified or synthetic baseline in use (contractId=${event.contractId})`,
+    };
+  }
+
+  return {
+    driftType: "none",
+    shouldWarn: false,
+    event,
+    baseline: resolvedBaseline,
+    reason: "No drift detected",
+  };
+}
+
+const DRIFT_WARN_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const DRIFT_WARN_MAX_ENTRIES = 256;
+const driftWarnDedupeMap = new Map<string, number>();
+
+export function _resetAntigravityDriftDedupeForTest(): void {
+  driftWarnDedupeMap.clear();
+}
+
+function buildDedupeKey(assessment: AntigravityCompatibilityAssessment): string {
+  const { event, driftType } = assessment;
+  return `${event.provider}:${event.profile}:${event.contractId}:${event.surface}:${driftType}:${event.redactedBodyDigest ?? "none"}`;
+}
+
+export function logAntigravityCompatibilityAssessment(
+  log: { debug?: (tag: string, message: string) => void; warn?: (tag: string, message: string) => void },
+  assessment: AntigravityCompatibilityAssessment
+): void {
+  // Always maintain existing AG_COMPATIBILITY debug logging
+  logAntigravityCompatibilityEvent(log, assessment.event);
+
+  if (!assessment.shouldWarn) return;
+
+  const now = Date.now();
+  const key = buildDedupeKey(assessment);
+
+  // Check TTL
+  const lastWarnTime = driftWarnDedupeMap.get(key);
+  if (lastWarnTime !== undefined && now - lastWarnTime < DRIFT_WARN_TTL_MS) {
+    // Deduplicated - update position for LRU
+    driftWarnDedupeMap.delete(key);
+    driftWarnDedupeMap.set(key, lastWarnTime);
+    return;
+  }
+
+  // Enforce max 256 entries LRU
+  if (driftWarnDedupeMap.size >= DRIFT_WARN_MAX_ENTRIES) {
+    // First prune expired entries
+    for (const [k, ts] of driftWarnDedupeMap) {
+      if (now - ts >= DRIFT_WARN_TTL_MS) {
+        driftWarnDedupeMap.delete(k);
+      }
+    }
+    // If still at or over capacity, delete oldest (first key in Map)
+    if (driftWarnDedupeMap.size >= DRIFT_WARN_MAX_ENTRIES) {
+      const oldestKey = driftWarnDedupeMap.keys().next().value;
+      if (oldestKey !== undefined) {
+        driftWarnDedupeMap.delete(oldestKey);
+      }
+    }
+  }
+
+  driftWarnDedupeMap.set(key, now);
+
+  const warnPayload = {
+    warning: "Antigravity compatibility drift detected",
+    driftType: assessment.driftType,
+    provider: assessment.event.provider,
+    profile: assessment.event.profile,
+    contractId: assessment.event.contractId,
+    surface: assessment.event.surface,
+    requestType: assessment.event.requestType,
+    attempt: assessment.event.attempt,
+    retryDecision: assessment.event.retryDecision,
+    observedVersion: assessment.event.observedVersion,
+    versionState: assessment.event.versionState,
+    errorClass: assessment.event.errorClass,
+    bodyDigest: assessment.event.redactedBodyDigest,
+    baselineBodyDigest: assessment.baseline?.bodyDigest ?? null,
+    reason: assessment.reason,
+  };
+
+  log.warn?.("AG_COMPATIBILITY_DRIFT", JSON.stringify(warnPayload));
+}
+
