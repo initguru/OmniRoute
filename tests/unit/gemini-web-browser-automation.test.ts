@@ -4,7 +4,13 @@ import type { Page } from "playwright";
 import {
   runGeminiDeepThinkUiStateMachine,
   GeminiWebUiStateError,
+  MODEL_RESPONSE_SELECTOR,
+  DEEP_THINK_TOGGLE_SELECTOR,
+  isDeepThinkActiveLabel,
+  isDeepThinkFailureText,
+  formatSyntheticStreamResponse,
 } from "../../open-sse/executors/gemini-web/browserAutomation.ts";
+import { parseStreamResponse } from "../../open-sse/executors/gemini-web.ts";
 
 interface MockPageOptions {
   initialModePickerAriaLabel?: string;
@@ -25,6 +31,8 @@ interface MockPageOptions {
   streamResponseDelayMs?: number;
   streamResponses?: Array<{ status?: number; body: string; delayMs?: number }>;
   neverRespond?: boolean;
+  domResponseTexts?: string[];
+  domResponseDelayMs?: number;
 }
 
 function createMockPage(options: MockPageOptions = {}) {
@@ -47,7 +55,17 @@ function createMockPage(options: MockPageOptions = {}) {
     streamResponseDelayMs = 5,
     streamResponses,
     neverRespond = false,
+    domResponseTexts = [],
+    domResponseDelayMs = 0,
   } = options;
+
+  let currentDomTexts: string[] = [...domResponseTexts];
+  if (domResponseDelayMs > 0 && domResponseTexts.length > 0) {
+    currentDomTexts = [];
+    setTimeout(() => {
+      currentDomTexts = [...domResponseTexts];
+    }, domResponseDelayMs);
+  }
 
   let currentModePickerAriaLabel = initialModePickerAriaLabel;
   let currentModePickerText = initialModePickerText;
@@ -195,6 +213,32 @@ function createMockPage(options: MockPageOptions = {}) {
               void triggerStreamResponse();
             }
           },
+        };
+      }
+
+      // Model response turn
+      if (
+        selector.includes("model-response-text") ||
+        selector.includes("message-content") ||
+        selector.includes("model-turn")
+      ) {
+        return {
+          first: () => ({
+            innerText: async () => currentDomTexts[0] ?? "",
+            textContent: async () => currentDomTexts[0] ?? "",
+          }),
+          count: async () => currentDomTexts.length,
+          allInnerTexts: async () => [...currentDomTexts],
+          allTextContents: async () => [...currentDomTexts],
+          all: async () =>
+            currentDomTexts.map((txt) => ({
+              innerText: async () => txt,
+              textContent: async () => txt,
+            })),
+          nth: (i: number) => ({
+            innerText: async () => currentDomTexts[i] ?? "",
+            textContent: async () => currentDomTexts[i] ?? "",
+          }),
         };
       }
 
@@ -710,4 +754,205 @@ test("Deep Think intermediate placeholder: ignores 'Responses with Deep Think ca
   assert.equal(mockPage.state.promptInjected, true);
   assert.equal(mockPage.state.promptSubmitted, true);
   assert.equal(mockPage.state.responseListenersCount, 0);
+});
+
+test("Task 1: isDeepThinkActiveLabel recognizes 'Extended thinking'", () => {
+  assert.equal(isDeepThinkActiveLabel("Open mode picker, currently Extended thinking"), true);
+  assert.equal(isDeepThinkActiveLabel("", "Extended thinking"), true);
+  assert.equal(isDeepThinkActiveLabel("Deep Think active"), true);
+  assert.equal(isDeepThinkActiveLabel("Fast mode"), false);
+});
+
+test("Task 1: isDeepThinkFailureText recognizes generation failure messages", () => {
+  assert.equal(
+    isDeepThinkFailureText("Gemini wasn't able to finish thinking. Please try again."),
+    true
+  );
+  assert.equal(
+    isDeepThinkFailureText("I was not able to finish thinking due to an internal error."),
+    true
+  );
+  assert.equal(
+    isDeepThinkFailureText("Gemini ran into an issue and wasn't able to finish this response."),
+    true
+  );
+  assert.equal(
+    isDeepThinkFailureText("This attempt didn't count against your Deep Think limit."),
+    true
+  );
+  assert.equal(isDeepThinkFailureText("Here is the answer to your mathematical proof."), false);
+});
+
+test("Task 1: MODEL_RESPONSE_SELECTOR and DEEP_THINK_TOGGLE_SELECTOR definitions", () => {
+  assert.ok(MODEL_RESPONSE_SELECTOR.includes(".model-response-text"));
+  assert.ok(MODEL_RESPONSE_SELECTOR.includes("message-content"));
+  assert.ok(DEEP_THINK_TOGGLE_SELECTOR.includes("Extended thinking"));
+});
+
+test("Task 1: formatSyntheticStreamResponse formats valid parseable stream output", () => {
+  const text = "Synthetic DOM response text";
+  const formatted = formatSyntheticStreamResponse(text);
+  assert.ok(formatted.startsWith(")]}'\n"));
+  assert.ok(formatted.includes("wrb.fr"));
+
+  const parsed = parseStreamResponse(formatted);
+  assert.equal(parsed, text);
+
+  // Escapes quotes and newlines
+  const complexText = 'Line 1\n"Line 2" with special chars & <tags>';
+  const complexFormatted = formatSyntheticStreamResponse(complexText);
+  assert.equal(parseStreamResponse(complexFormatted), complexText);
+});
+
+test("Task 2: DOM failure rejection occurs within < 1 second instead of waiting for timeout", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    neverRespond: true, // Network will never respond
+    domResponseTexts: [
+      "Gemini wasn't able to finish thinking. This attempt didn't count against your Deep Think limit.",
+    ],
+    domResponseDelayMs: 20,
+  });
+
+  const start = Date.now();
+  await assert.rejects(
+    async () => {
+      await runGeminiDeepThinkUiStateMachine({
+        page: mockPage as unknown as Page,
+        prompt: "Complex prompt that fails in Deep Think generation",
+        signal: new AbortController().signal,
+        timeoutMs: 10000, // 10s timeout - must fail in < 1s via DOM polling!
+      });
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof GeminiWebUiStateError);
+      assert.equal(err.kind, "gemini_deep_think_generation_failed");
+      assert.equal(err.status, 502);
+      assert.match(err.message, /wasn't able to finish thinking/i);
+      return true;
+    }
+  );
+
+  const durationMs = Date.now() - start;
+  assert.ok(
+    durationMs < 1000,
+    `Expected failure in < 1000ms, took ${durationMs}ms (should not wait for 10000ms timeout)`
+  );
+  assert.equal(mockPage.state.responseListenersCount, 0);
+});
+
+test("Task 2: DOM success resolution when network only emits placeholder", async () => {
+  const placeholderBody =
+    ')]}\'\n[["wrb.fr",null,"[[null,null,null,null,[null,null,null,null,[\\"Responses with Deep Think can take some time\\\\n\\\\n http://googleusercontent.com/agentic_processing_chip/0\\"]]]]"]]';
+
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    streamResponses: [{ status: 200, body: placeholderBody, delayMs: 5 }],
+    domResponseTexts: ["Detailed proof successfully computed by Gemini Deep Think."],
+    domResponseDelayMs: 30,
+  });
+
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt: "Prompt where network stalls on placeholder",
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  const parsed = parseStreamResponse(rawResponse);
+  assert.equal(parsed, "Detailed proof successfully computed by Gemini Deep Think.");
+  assert.equal(mockPage.state.responseListenersCount, 0);
+});
+
+test("Task 2: DOM resolution when network emits len: 0 (empty body)", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    streamResponses: [{ status: 200, body: "", delayMs: 5 }],
+    domResponseTexts: ["Answer recovered via DOM after empty network stream"],
+    domResponseDelayMs: 30,
+  });
+
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt: "Prompt where network emits empty chunk",
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  const parsed = parseStreamResponse(rawResponse);
+  assert.equal(parsed, "Answer recovered via DOM after empty network stream");
+  assert.equal(mockPage.state.responseListenersCount, 0);
+});
+
+test("Task 2: Cleanup in finally for all paths (DOM success, DOM failure, timeout, abort)", async () => {
+  // 1. DOM success path cleanup
+  const successPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    neverRespond: true,
+    domResponseTexts: ["DOM success answer"],
+    domResponseDelayMs: 10,
+  });
+  await runGeminiDeepThinkUiStateMachine({
+    page: successPage as unknown as Page,
+    prompt: "DOM success",
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+  assert.equal(successPage.state.responseListenersCount, 0);
+
+  // 2. DOM failure path cleanup
+  const failurePage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    neverRespond: true,
+    domResponseTexts: ["Gemini wasn't able to finish thinking."],
+    domResponseDelayMs: 10,
+  });
+  await assert.rejects(async () => {
+    await runGeminiDeepThinkUiStateMachine({
+      page: failurePage as unknown as Page,
+      prompt: "DOM failure",
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+    });
+  });
+  assert.equal(failurePage.state.responseListenersCount, 0);
+
+  // 3. Timeout path cleanup
+  const timeoutPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    neverRespond: true,
+    domResponseTexts: [],
+  });
+  await assert.rejects(async () => {
+    await runGeminiDeepThinkUiStateMachine({
+      page: timeoutPage as unknown as Page,
+      prompt: "Timeout path",
+      signal: new AbortController().signal,
+      timeoutMs: 50,
+    });
+  });
+  assert.equal(timeoutPage.state.responseListenersCount, 0);
+
+  // 4. Abort path cleanup
+  const abortPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    neverRespond: true,
+  });
+  const ac = new AbortController();
+  const abortPromise = runGeminiDeepThinkUiStateMachine({
+    page: abortPage as unknown as Page,
+    prompt: "Abort path",
+    signal: ac.signal,
+    timeoutMs: 5000,
+  });
+  setTimeout(() => ac.abort(new Error("Client cancelled")), 15);
+  await assert.rejects(abortPromise);
+  assert.equal(abortPage.state.responseListenersCount, 0);
 });

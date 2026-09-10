@@ -85,7 +85,7 @@ function createMockPage(
     goto: async () => {},
     waitForTimeout: async () => {},
     locator(selector: string) {
-      if (selector.includes("aria-label*='Open mode picker, currently '")) {
+      if (selector.includes("Open mode picker")) {
         return {
           first: () => this.locator(selector),
           count: async () => 1,

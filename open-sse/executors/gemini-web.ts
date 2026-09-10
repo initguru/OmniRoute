@@ -282,7 +282,8 @@ export function parseStreamResponse(raw: string): string {
       if (typeof payload !== "string") continue;
       const inner = JSON.parse(payload);
       // Defensive: check each level before accessing
-      const responseArray = inner?.[4]?.[0]?.[1];
+      const responseArray =
+        inner?.[4]?.[0]?.[1] ?? inner?.[0]?.[4]?.[4] ?? inner?.[0]?.[4]?.[0]?.[1];
       if (!Array.isArray(responseArray)) continue;
       const text = responseArray.filter((c: unknown) => typeof c === "string").join("");
       if (text) lastText = text;
@@ -675,7 +676,12 @@ export class GeminiWebExecutor extends BaseExecutor {
           response: new Response(
             JSON.stringify(
               buildErrorBody(error.status, error.message, null, {
-                type: error.status === 401 ? "authentication_error" : "invalid_request_error",
+                type:
+                  error.status === 401
+                    ? "authentication_error"
+                    : error.status >= 500
+                      ? "server_error"
+                      : "invalid_request_error",
                 code: error.code,
               })
             ),

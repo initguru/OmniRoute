@@ -17,7 +17,8 @@ export type GeminiWebUiFailureKind =
   | "gemini_web_auth_required"
   | "gemini_deep_think_unavailable"
   | "gemini_web_ui_contract_mismatch"
-  | "gemini_web_completion_unverified";
+  | "gemini_web_completion_unverified"
+  | "gemini_deep_think_generation_failed";
 
 export class GeminiWebUiStateError extends Error {
   readonly kind: GeminiWebUiFailureKind;
@@ -27,7 +28,11 @@ export class GeminiWebUiStateError extends Error {
   constructor(
     kind: GeminiWebUiFailureKind,
     message: string,
-    status: number = kind === "gemini_web_auth_required" ? 401 : 409
+    status: number = kind === "gemini_web_auth_required"
+      ? 401
+      : kind === "gemini_deep_think_generation_failed"
+        ? 502
+        : 409
   ) {
     super(message);
     this.name = "GeminiWebUiStateError";
@@ -50,7 +55,9 @@ export const MODE_PICKER_TRIGGER_SELECTOR = "button[aria-label*='Open mode picke
 export const PRO_MENU_ITEM_SELECTOR =
   "[role='menuitem'][data-test-id='bard-mode-option-9d8ca3786ebdfbea'], [role='menuitem']:has-text('3.1 Pro'), [role='menuitem']:has-text('Pro')";
 export const DEEP_THINK_TOGGLE_SELECTOR =
-  "[role='menuitem']:has-text('Deep Think'), button:has-text('Deep Think')";
+  "[role='menuitem']:has-text('Deep Think'), button:has-text('Deep Think'), [role='menuitem']:has-text('Extended thinking'), button:has-text('Extended thinking')";
+export const MODEL_RESPONSE_SELECTOR =
+  ".model-response-text, message-content, [data-message-id] .message-content, [data-test-id*='model-turn']";
 
 /**
  * Validates if the mode picker aria-label or button text indicates Pro mode.
@@ -70,11 +77,39 @@ export function isProModeLabel(label: string, buttonText: string = ""): boolean 
 
 /**
  * Validates if the mode picker aria-label or button text indicates Deep Think is already active.
+ * Matches "deep think" or "extended thinking" (case-insensitive).
  */
 export function isDeepThinkActiveLabel(ariaLabel: string, buttonText: string = ""): boolean {
   const lowerLabel = ariaLabel.toLowerCase();
   const lowerText = buttonText.toLowerCase();
-  return lowerLabel.includes("deep think") || lowerText.includes("deep think");
+  return (
+    lowerLabel.includes("deep think") ||
+    lowerText.includes("deep think") ||
+    lowerLabel.includes("extended thinking") ||
+    lowerText.includes("extended thinking")
+  );
+}
+
+/**
+ * Checks if response text indicates Gemini Deep Think / Extended thinking failed to finish generating.
+ */
+export function isDeepThinkFailureText(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("wasn't able to finish thinking") ||
+    lower.includes("was not able to finish thinking") ||
+    lower.includes("ran into an issue and wasn't able to finish") ||
+    lower.includes("didn't count against your deep think limit")
+  );
+}
+
+/**
+ * Formats a synthetic StreamGenerate raw response chunk from scraped DOM text
+ * so that `parseStreamResponse()` in `gemini-web.ts` can extract it directly.
+ */
+export function formatSyntheticStreamResponse(text: string): string {
+  const inner = [[null, null, null, null, [null, null, null, null, [text]]]];
+  return `)]}'\n${JSON.stringify([["wrb.fr", null, JSON.stringify(inner)]])}`;
 }
 
 /**
@@ -115,6 +150,7 @@ export async function runGeminiDeepThinkUiStateMachine(
   let responseError: Error | null = null;
   let resolveResponse: (() => void) | null = null;
   let rejectResponse: ((err: Error) => void) | null = null;
+  let domPollInterval: NodeJS.Timeout | null = null;
 
   const responsePromise = new Promise<string>((resolve, reject) => {
     resolveResponse = () => {
@@ -136,6 +172,10 @@ export async function runGeminiDeepThinkUiStateMachine(
           ? resp.status()
           : (resp as unknown as { status?: number }).status;
       if (typeof status === "number" && (status < 200 || status >= 300)) {
+        if (domPollInterval) {
+          clearInterval(domPollInterval);
+          domPollInterval = null;
+        }
         responseError = new GeminiWebUiStateError(
           "gemini_web_completion_unverified",
           `StreamGenerate returned HTTP ${status}`,
@@ -148,25 +188,28 @@ export async function runGeminiDeepThinkUiStateMachine(
       const text = typeof resp.text === "function" ? await resp.text() : await resp.body();
       const bodyStr = typeof text === "string" ? text : String(text);
       if (!bodyStr || bodyStr.trim().length === 0) {
-        responseError = new GeminiWebUiStateError(
-          "gemini_web_completion_unverified",
-          "StreamGenerate returned empty response body",
-          502
-        );
-        rejectResponse?.(responseError);
+        // Empty or 0-length response stream: allow DOM polling to resolve instead of failing prematurely
         return;
       }
 
       // If the response is an intermediate Deep Think processing placeholder,
-      // do not resolve yet; continue awaiting subsequent StreamGenerate response.
+      // do not resolve yet; continue awaiting subsequent StreamGenerate response or DOM resolution.
       if (isDeepThinkPlaceholder(bodyStr)) {
         return;
       }
 
+      if (domPollInterval) {
+        clearInterval(domPollInterval);
+        domPollInterval = null;
+      }
       rawResponseBody = bodyStr;
       resolveResponse?.();
     } catch (err) {
       if (!rawResponseBody && !responseError) {
+        if (domPollInterval) {
+          clearInterval(domPollInterval);
+          domPollInterval = null;
+        }
         responseError = err instanceof Error ? err : new Error(String(err));
         rejectResponse?.(responseError);
       }
@@ -375,6 +418,76 @@ export async function runGeminiDeepThinkUiStateMachine(
       );
     }
 
+    // Start dual DOM polling for model response or terminal generation failure state
+    const checkDomState = async () => {
+      try {
+        const loc = page.locator(MODEL_RESPONSE_SELECTOR);
+        let texts: string[] = [];
+        if (typeof loc.allInnerTexts === "function") {
+          texts = await loc.allInnerTexts();
+        } else if (typeof loc.allTextContents === "function") {
+          texts = await loc.allTextContents();
+        } else if (typeof loc.all === "function") {
+          const elements = await loc.all();
+          for (const el of elements) {
+            const t =
+              (typeof el.innerText === "function" ? await el.innerText() : null) ||
+              (typeof el.textContent === "function" ? await el.textContent() : null) ||
+              "";
+            if (t) texts.push(t);
+          }
+        } else if (typeof loc.count === "function") {
+          const count = await loc.count();
+          for (let i = 0; i < count; i++) {
+            const el = typeof loc.nth === "function" ? loc.nth(i) : i === 0 ? loc.first() : null;
+            if (!el) continue;
+            const t =
+              (typeof el.innerText === "function" ? await el.innerText() : null) ||
+              (typeof el.textContent === "function" ? await el.textContent() : null) ||
+              "";
+            if (t) texts.push(t);
+          }
+        }
+
+        if (texts.length === 0) return;
+
+        for (let i = texts.length - 1; i >= 0; i--) {
+          const turnText = texts[i];
+          if (!turnText) continue;
+
+          if (isDeepThinkFailureText(turnText)) {
+            if (domPollInterval) {
+              clearInterval(domPollInterval);
+              domPollInterval = null;
+            }
+            const err = new GeminiWebUiStateError(
+              "gemini_deep_think_generation_failed",
+              turnText.trim(),
+              502
+            );
+            rejectResponse?.(err);
+            return;
+          }
+
+          const trimmed = turnText.trim();
+          if (trimmed.length > 0 && !isDeepThinkPlaceholder(trimmed)) {
+            if (domPollInterval) {
+              clearInterval(domPollInterval);
+              domPollInterval = null;
+            }
+            rawResponseBody = formatSyntheticStreamResponse(trimmed);
+            resolveResponse?.();
+            return;
+          }
+        }
+      } catch {
+        /* ignore transient DOM polling errors */
+      }
+    };
+
+    void checkDomState();
+    domPollInterval = setInterval(checkDomState, 350);
+
     // 6. Wait for verified response
     return await responsePromise;
   };
@@ -382,6 +495,10 @@ export async function runGeminiDeepThinkUiStateMachine(
   try {
     return await Promise.race([executeStateMachine(), timeoutPromise, abortPromise]);
   } finally {
+    if (domPollInterval) {
+      clearInterval(domPollInterval);
+      domPollInterval = null;
+    }
     if (timer) {
       clearTimeout(timer);
     }

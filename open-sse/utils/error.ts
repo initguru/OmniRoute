@@ -111,6 +111,7 @@ const SAFE_PUBLIC_ERROR_IDENTIFIERS = new Set([
   "executor_error",
   "feature_disabled",
   "gateway_timeout",
+  "gemini_deep_think_generation_failed",
   "gemini_deep_think_timeout",
   "gemini_deep_think_unavailable",
   "gemini_web_auth_required",

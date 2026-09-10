@@ -265,6 +265,122 @@ test("#2832: GeminiWebExecutor catch block sanitizes Playwright launch errors (i
   assert.ok(!json.error.includes("at /"), "no stack trace path in error response");
 });
 
+test("GeminiWebExecutor handles GeminiWebUiStateError with gemini_deep_think_generation_failed as HTTP 502", async () => {
+  const playwright = await import("playwright");
+  const originalLaunch = playwright.chromium.launch;
+
+  playwright.chromium.launch = (async () => {
+    return {
+      newContext: async () => ({
+        addCookies: async () => {},
+        newPage: async () => ({
+          goto: async () => {},
+          waitForTimeout: async () => {},
+          locator: (selector: string) => {
+            if (selector.includes("ql-editor") || selector.includes("contenteditable")) {
+              return {
+                first: () => ({
+                  count: async () => 1,
+                  fill: async () => {},
+                  innerText: async () => "prompt",
+                  textContent: async () => "prompt",
+                  inputValue: async () => "prompt",
+                  press: async () => {},
+                }),
+                count: async () => 1,
+                fill: async () => {},
+                innerText: async () => "prompt",
+                textContent: async () => "prompt",
+                inputValue: async () => "prompt",
+                press: async () => {},
+              };
+            }
+            if (selector.includes("aria-label*='Open mode picker'")) {
+              return {
+                first: () => ({
+                  count: async () => 1,
+                  getAttribute: async () => "Open mode picker, currently Pro Deep Think",
+                  innerText: async () => "Pro\nDeep Think",
+                  textContent: async () => "Pro\nDeep Think",
+                }),
+                count: async () => 1,
+                getAttribute: async () => "Open mode picker, currently Pro Deep Think",
+                innerText: async () => "Pro\nDeep Think",
+                textContent: async () => "Pro\nDeep Think",
+              };
+            }
+            if (selector.includes("model-response-text") || selector.includes("message-content")) {
+              return {
+                first: () => ({
+                  innerText: async () => "Gemini wasn't able to finish thinking. Please try again.",
+                  textContent: async () =>
+                    "Gemini wasn't able to finish thinking. Please try again.",
+                }),
+                count: async () => 1,
+                allInnerTexts: async () => [
+                  "Gemini wasn't able to finish thinking. Please try again.",
+                ],
+                allTextContents: async () => [
+                  "Gemini wasn't able to finish thinking. Please try again.",
+                ],
+                all: async () => [
+                  {
+                    innerText: async () =>
+                      "Gemini wasn't able to finish thinking. Please try again.",
+                    textContent: async () =>
+                      "Gemini wasn't able to finish thinking. Please try again.",
+                  },
+                ],
+                nth: () => ({
+                  innerText: async () => "Gemini wasn't able to finish thinking. Please try again.",
+                  textContent: async () =>
+                    "Gemini wasn't able to finish thinking. Please try again.",
+                }),
+              };
+            }
+            return {
+              first: () => ({ count: async () => 0 }),
+              count: async () => 0,
+              getAttribute: async () => null,
+            };
+          },
+          keyboard: { press: async () => {} },
+          on: () => {},
+          off: () => {},
+        }),
+      }),
+      close: async () => {},
+    };
+  }) as unknown as typeof playwright.chromium.launch;
+
+  try {
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: { messages: [{ role: "user", content: "hard problem" }], stream: false },
+      stream: false,
+      credentials: { apiKey: "cookie=123" },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+    });
+
+    assert.equal(result.response.status, 502);
+    interface ErrorBodyShape {
+      error: {
+        code: string;
+        type: string;
+        message: string;
+      };
+    }
+    const json = (await result.response.json()) as ErrorBodyShape;
+    assert.equal(json.error.code, "gemini_deep_think_generation_failed");
+    assert.equal(json.error.type, "server_error");
+    assert.match(json.error.message, /wasn't able to finish thinking/i);
+  } finally {
+    playwright.chromium.launch = originalLaunch;
+  }
+});
+
 // ─── StreamGenerate parsing ─────────────────────────────────────────────────
 
 test("parseStreamResponse keeps only the final cumulative StreamGenerate snapshot (no duplication) — regression for #7163", () => {
