@@ -3351,8 +3351,18 @@ export async function handleChatCore({
                     // explicitly configured stream recovery (env var or DB/settings
                     // override), that value always wins — the goal policy must never
                     // re-enable recovery the operator explicitly turned off.
+                    // For antigravity/agy, goal override is excluded to preserve CLI parity and avoid
+                    // redundant requests/Unusual Activity flags on clean streams.
+                    const isAntigravityProvider =
+                      resolvedProvider === "antigravity" ||
+                      resolvedProvider === "agy" ||
+                      provider === "antigravity" ||
+                      provider === "agy";
                     const operatorExplicit = isStreamRecoveryExplicitlyConfigured(settings);
-                    const goalOverride = !operatorExplicit && agentGoalPolicy.streamRecoveryEnabled;
+                    const goalOverride =
+                      !operatorExplicit &&
+                      !isAntigravityProvider &&
+                      agentGoalPolicy.streamRecoveryEnabled;
                     streamRecoveryEnabled = sr.enabled || goalOverride;
                     continueMidStreamEnabled = sr.continueMidStream === true;
                     throughputWatchdog = sr.throughputWatchdog;

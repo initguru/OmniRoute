@@ -156,7 +156,7 @@ export function isRetryableStreamError(error: unknown): boolean {
 }
 
 // Terminal SSE markers OmniRoute emits across formats: OpenAI `data: [DONE]`,
-// Anthropic `event: message_stop`. Presence means the stream ended cleanly.
+// Anthropic `event: message_stop`, Gemini/Antigravity `finishReason`. Presence means the stream ended cleanly.
 const OPENAI_DONE_MARKER = "[DONE]";
 const ANTHROPIC_STOP_MARKER = "message_stop";
 
@@ -169,7 +169,12 @@ const ANTHROPIC_STOP_MARKER = "message_stop";
 export function hasTerminalMarker(bytes: Uint8Array): boolean {
   if (!bytes || bytes.byteLength === 0) return false;
   const text = new TextDecoder().decode(bytes);
-  return text.includes(OPENAI_DONE_MARKER) || text.includes(ANTHROPIC_STOP_MARKER);
+  return (
+    text.includes(OPENAI_DONE_MARKER) ||
+    text.includes(ANTHROPIC_STOP_MARKER) ||
+    text.includes("finishReason") ||
+    text.includes("FINISH_REASON")
+  );
 }
 
 // ──────────────── Mid-stream continuation primitives (Fase 4.4) ────────────────
