@@ -98,7 +98,8 @@ export function checkGeminiWebUnsupportedControls(
 ): GeminiWebCapabilityViolation | null {
   if (!body || typeof body !== "object") return null;
 
-  const resolvedModel = normalizeString(model) ?? normalizeString(body.model);
+  const rawModel = normalizeString(model) ?? normalizeString(body.model);
+  const resolvedModel = rawModel ? rawModel.replace(/^(?:gweb|gemini-web)\//, "") : null;
 
   if (resolvedModel === "gemini-deep-think") {
     const effort = normalizeString(body.reasoning_effort);

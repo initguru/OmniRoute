@@ -958,12 +958,15 @@ export class GeminiWebExecutor extends BaseExecutor {
     const { model, body, stream, credentials, signal, log, onCredentialsRefreshed } = input;
     const requestBody = body as GeminiRequestBody;
 
+    const rawModel = model || (body as { model?: string })?.model || "";
+    const modelId = rawModel.replace(/^(?:gweb|gemini-web)\//, "") || "gemini-2.5-pro";
+
     // #9356: fail fast on controls this provider cannot honor (reasoning_effort
     // above "minimal", forced tool_choice). Runs before the credential check and
     // before Playwright launches — the request is unservable no matter which
     // cookie is used, and answering 200 with ordinary prose made agents believe
     // their reasoning/tool requirements had been met. See ./gemini-web/capabilities.ts.
-    const violation = checkGeminiWebUnsupportedControls(body as Record<string, unknown>, model);
+    const violation = checkGeminiWebUnsupportedControls(body as Record<string, unknown>, modelId);
     if (violation) {
       log?.warn?.(
         "GEMINI-WEB",
@@ -1024,8 +1027,6 @@ export class GeminiWebExecutor extends BaseExecutor {
         transformedBody: body,
       };
     }
-
-    const modelId = model || "gemini-2.5-pro";
 
     const useBrowserAutomation =
       (

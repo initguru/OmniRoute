@@ -567,3 +567,65 @@ test("GeminiWebExecutor handles Direct API polling timeout as HTTP 504 gemini_de
   assert.equal(json.error.code, GEMINI_DEEP_THINK_TIMEOUT_CODE);
   assert.equal(json.error.type, "timeout_error");
 });
+
+test("GeminiWebExecutor routes model 'gweb/gemini-deep-think' to executeDirectDeepThink instead of Playwright browser automation", async () => {
+  clearGeminiWebSessionCache();
+  const mockHtml = `<html><head><script>window.WIZ_global_data={"SNlM0e":"at123","FdrFJe":"fsid123","cfb2h":"bl123"};</script></head></html>`;
+
+  const mockFetch = (async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/app")) {
+      return new Response(mockHtml, { status: 200, headers: { "Content-Type": "text/html" } });
+    }
+    if (url.includes("StreamGenerate")) {
+      return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+    }
+    if (url.includes("batchexecute")) {
+      return new Response(fixture.pollCompletedResponse, { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  }) as typeof fetch;
+
+  const playwright = await import("playwright");
+  const originalLaunch = playwright.chromium.launch;
+  playwright.chromium.launch = async () => {
+    assert.fail(
+      "Playwright chromium.launch must not be called when routed to executeDirectDeepThink"
+    );
+  };
+
+  try {
+    const executor = new GeminiWebExecutor();
+    let directDeepThinkCalled = false;
+    const directProto = executor as unknown as {
+      executeDirectDeepThink: (...args: unknown[]) => unknown;
+    };
+    const originalDirect = directProto.executeDirectDeepThink;
+    directProto.executeDirectDeepThink = async (...args: unknown[]) => {
+      directDeepThinkCalled = true;
+      return originalDirect.apply(executor, args);
+    };
+
+    const result = await executor.execute({
+      model: "gweb/gemini-deep-think",
+      body: { messages: [{ role: "user", content: "Reason through this" }], stream: false },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=cookie-test",
+        providerSpecificData: { pollIntervalMs: 5 },
+      },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+      fetch: mockFetch,
+    } as unknown as ExecuteInput);
+
+    assert.equal(directDeepThinkCalled, true, "executeDirectDeepThink must be called");
+    assert.equal(result.response.status, 200);
+    const json = (await result.response.json()) as DirectCompletionShape;
+    assert.equal(json.choices[0].message.content, "Paris");
+    assert.equal(json.model, "gemini-deep-think");
+  } finally {
+    playwright.chromium.launch = originalLaunch;
+  }
+});
