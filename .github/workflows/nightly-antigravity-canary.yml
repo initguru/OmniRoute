@@ -56,7 +56,7 @@ jobs:
           set +e
           node --import tsx/esm scripts/check/check-antigravity-external-canary.ts \
             --profile "$PROFILE" \
-            --output "$REPORT_JSON" > "$RESULT_JSON" 2>&1
+            --output "$REPORT_JSON" > "$RESULT_JSON" 2> "$ARTIFACT_DIR/canary-stderr.log"
           CANARY_EXIT=$?
           set -e
 
