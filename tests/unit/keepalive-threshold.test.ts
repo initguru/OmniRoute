@@ -63,6 +63,12 @@ describe("resolveKeepaliveThreshold", () => {
     assert.equal(resolveKeepaliveThreshold("claude-web/claude-sonnet-4"), 15000);
   });
 
+  it("returns 2000ms default for gemini-deep-think under web-session providers (gweb/gemini-web)", () => {
+    assert.equal(resolveKeepaliveThreshold("gweb/gemini-deep-think"), 2000);
+    assert.equal(resolveKeepaliveThreshold("gemini-web/gemini-deep-think"), 2000);
+    assert.equal(resolveKeepaliveThreshold("gweb/gemini-2.5-pro"), 15000);
+  });
+
   it("SLOW_KEEPALIVE_PROVIDERS set contains expected providers", () => {
     assert.ok(SLOW_KEEPALIVE_PROVIDERS.has("pollinations"));
     assert.ok(SLOW_KEEPALIVE_PROVIDERS.has("pol"));

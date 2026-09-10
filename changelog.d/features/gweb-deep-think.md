@@ -1,0 +1,1 @@
+- **gemini-web**: add `gweb/gemini-deep-think` virtual model forcing Gemini 3.1 Pro Deep Think on verified Google AI Ultra web sessions.

@@ -55,6 +55,9 @@ export function resolveKeepaliveThreshold(model: string | undefined | null): num
   const slashIndex = model.indexOf("/");
   if (slashIndex <= 0) return DEFAULT_THRESHOLD_MS;
 
+  const rawModel = model.slice(slashIndex + 1);
+  if (rawModel === "gemini-deep-think") return DEFAULT_THRESHOLD_MS;
+
   const prefix = model.slice(0, slashIndex);
   if (SLOW_PROVIDER_IDS.has(prefix)) return SLOW_THRESHOLD_MS;
 
