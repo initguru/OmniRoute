@@ -8,6 +8,10 @@ export const gemini_webProvider: RegistryEntry = {
   baseUrl: "https://gemini.google.com/app",
   authType: "apikey",
   authHeader: "cookie",
+  // gemini-web uses web-session automation and exposes virtual models like
+  // gemini-deep-think (3.1 Pro + Deep Think UI state machine) that are not
+  // discovered by static imported connection catalogs.
+  liveCatalogAuthoritative: false,
   // #9356: `supportsReasoning: false` is a live-behavior statement, not a guess
   // about the underlying Gemini model. The executor drives the gemini.google.com
   // web UI by typing a prompt, so it has no thinking-budget control to set and

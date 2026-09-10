@@ -23,6 +23,11 @@ test("gemini-web registry includes gemini-deep-think with reasoning and timeout"
     600_000,
     "gemini-deep-think timeoutMs must be 600,000 (10 minutes)"
   );
+  assert.equal(
+    gemini_webProvider.liveCatalogAuthoritative,
+    false,
+    "gemini-web must set liveCatalogAuthoritative: false to allow virtual models like gemini-deep-think"
+  );
 
   assert.equal(
     supportsReasoning({ provider: "gemini-web", model: "gemini-deep-think" }),
