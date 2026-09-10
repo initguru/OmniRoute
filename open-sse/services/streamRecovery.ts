@@ -335,7 +335,22 @@ export function trimContinuationOverlap(emitted: string, continuation: string): 
   return continuation;
 }
 
+/**
+ * Whether mid-stream continuation can be attempted for a given provider.
+ * Antigravity/AGY backend does not support assistant prefill continuation and doing so
+ * triggers upstream 'Unusual Activity' account-level blocks.
+ */
+export function canAttemptContinuation(provider?: string | { provider?: string } | null): boolean {
+  if (!provider) return true;
+  const prov = typeof provider === "string" ? provider : provider.provider;
+  if (!prov || typeof prov !== "string") return true;
+  const p = prov.toLowerCase().trim();
+  return p !== "antigravity" && p !== "agy";
+}
+
 export interface RecoverableStreamOptions {
+  /** Optional provider name for provider-specific recovery safeguards (e.g. Antigravity ban protection). */
+  provider?: string;
   /** Released exactly once when the wrapped stream closes, errors, or is cancelled. */
   finalize: () => void;
   /** Max transparent re-opens while the holdback is still uncommitted. */
@@ -419,7 +434,8 @@ export function createRecoverableStream(
   };
 
   // ── Mid-stream continuation state (no-op unless options.continueStream is set) ──
-  const continueEnabled = typeof options.continueStream === "function";
+  const continueEnabled =
+    typeof options.continueStream === "function" && canAttemptContinuation(options.provider);
   const maxContinuations = options.maxContinuations ?? STREAM_RECOVERY.EARLY_RETRY_MAX;
   const encoder = new TextEncoder();
   const trackDecoder = new TextDecoder();

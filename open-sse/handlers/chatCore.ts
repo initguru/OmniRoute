@@ -259,7 +259,11 @@ import {
   STREAM_DISCONNECT_GRACE_PERIOD_MS,
 } from "../config/constants.ts";
 import { applyStatusRestatement } from "../config/upstreamStatusRestatement.ts";
-import { createRecoverableStream, makeContinuationBody } from "../services/streamRecovery.ts";
+import {
+  createRecoverableStream,
+  makeContinuationBody,
+  canAttemptContinuation,
+} from "../services/streamRecovery.ts";
 import {
   resolveResilienceSettings,
   isStreamRecoveryExplicitlyConfigured,
@@ -3123,6 +3127,7 @@ export async function handleChatCore({
       try {
         const rawResult: ChatCoreExecutorResult = await (async () => {
           let attempts = 0;
+          let providerRetryState: unknown;
           const isModelScopeForRequest = isModelScope();
           const maxAttempts = isModelScopeForRequest ? 3 : provider === "codex" ? 3 : 1;
 
@@ -3221,6 +3226,7 @@ export async function handleChatCore({
                           onCredentialsRefreshed,
                           skipUpstreamRetry,
                           contextEditing: { enabled: contextEditingEnabled },
+                          providerRetryState,
                         })
                       ),
                   });
@@ -3420,23 +3426,26 @@ export async function handleChatCore({
 
                   // Mid-stream continuation (Fase 4.4): re-request with the partial text as an
                   // assistant prefill. Gated by its own setting and only for OpenAI-compatible
-                  // bodies (makeContinuationBody returns null otherwise).
-                  const continueStream = continueMidStreamEnabled
-                    ? (assistantSoFar: string) => {
-                        const continuationBody = makeContinuationBody(
-                          bodyToSend as Record<string, unknown>,
-                          assistantSoFar
-                        );
-                        return continuationBody
-                          ? runUpstreamStream(continuationBody)
-                          : Promise.resolve(null);
-                      }
-                    : undefined;
+                  // bodies (makeContinuationBody returns null otherwise). Antigravity is excluded
+                  // to prevent upstream CLI divergence and unusual activity bans.
+                  const continueStream =
+                    continueMidStreamEnabled && canAttemptContinuation(provider)
+                      ? (assistantSoFar: string) => {
+                          const continuationBody = makeContinuationBody(
+                            bodyToSend as Record<string, unknown>,
+                            assistantSoFar
+                          );
+                          return continuationBody
+                            ? runUpstreamStream(continuationBody)
+                            : Promise.resolve(null);
+                        }
+                      : undefined;
 
                   clientBody = createRecoverableStream(
                     originalBody as ReadableStream<Uint8Array>,
                     () => runUpstreamStream(bodyToSend),
                     {
+                      provider,
                       finalize: releaseAccountSemaphore,
                       onRetry: (attempt, err) =>
                         log?.warn?.(
@@ -3660,7 +3669,6 @@ export async function handleChatCore({
   let providerHeaders;
   let finalBody;
   let claudePromptCacheLogMeta = null;
-  let providerRetryState: unknown;
 
   let pipelineRecovered = false;
   if (stream) {

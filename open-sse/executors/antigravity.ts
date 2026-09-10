@@ -1323,6 +1323,37 @@ export class AntigravityExecutor extends BaseExecutor {
       processAntigravitySSEText(decoder.decode(), partialLine, collected, logger);
       flushAntigravitySSEText(partialLine, collected, logger);
 
+      if (collected.error) {
+        const errObj = collected.error as Record<string, unknown>;
+        const rawCode = errObj?.code;
+        const errStatus =
+          typeof rawCode === "number" && rawCode >= 400 && rawCode <= 599
+            ? rawCode
+            : errObj?.status === "RESOURCE_EXHAUSTED"
+              ? 429
+              : 502;
+        const errMsg =
+          typeof errObj?.message === "string"
+            ? errObj.message
+            : typeof collected.error === "string"
+              ? collected.error
+              : "Antigravity upstream stream error";
+        const errResponse = new Response(
+          JSON.stringify({
+            error: {
+              message: errMsg,
+              type: errStatus === 429 ? "rate_limit_error" : "upstream_error",
+              code: errObj?.status || (errStatus === 429 ? "rate_limit_exceeded" : "upstream_error"),
+            },
+          }),
+          {
+            status: errStatus,
+            headers: [["Content-Type", "application/json"]],
+          }
+        );
+        return { response: errResponse, url, headers, transformedBody };
+      }
+
       const result = {
         id: `chatcmpl-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
         object: "chat.completion",

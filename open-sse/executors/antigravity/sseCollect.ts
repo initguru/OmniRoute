@@ -14,6 +14,7 @@ export type AntigravityCollectedStream = {
   }>;
   usage: Record<string, unknown> | null;
   remainingCredits: Array<{ creditType: string; creditAmount: string }> | null;
+  error?: unknown;
 };
 
 // Both run once per SSE data line / per text part (processAntigravitySSEPayload),
@@ -72,14 +73,63 @@ export function addAntigravityTextualToolCall(
   collected.finishReason = "tool_calls";
 }
 
+type AntigravitySSEChunk = {
+  markdown?: string;
+  response?: {
+    markdown?: string;
+    error?: { code?: number | string; message?: string; status?: string };
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{
+          text?: string;
+          thought?: boolean;
+          thoughtSignature?: string;
+          functionCall?: { id?: string; name?: string; args?: Record<string, unknown> };
+        }>;
+      };
+      finishReason?: string;
+    }>;
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      totalTokenCount?: number;
+    };
+  };
+  error?: { code?: number | string; message?: string; status?: string };
+  remainingCredits?: Array<{ creditType: string; creditAmount: string }>;
+};
+
 export function processAntigravitySSEPayload(
   payload: string,
   collected: AntigravityCollectedStream,
   log?: { debug?: (scope: string, message: string) => void }
 ) {
   if (!payload || payload === "[DONE]") return;
+  let parsed: AntigravitySSEChunk | null = null;
   try {
-    const parsed = JSON.parse(payload);
+    parsed = JSON.parse(payload) as AntigravitySSEChunk;
+  } catch {
+    log?.debug?.("SSE_PARSE", `Skipping malformed SSE line: ${String(payload).slice(0, 80)}`);
+    return;
+  }
+
+  const errorObj = parsed?.response?.error || parsed?.error;
+  if (errorObj) {
+    if (collected && typeof collected === "object") {
+      collected.error = errorObj;
+    }
+    const message =
+      typeof errorObj === "string"
+        ? errorObj
+        : errorObj?.message || "Antigravity upstream stream error";
+    const err = new Error(message);
+    if (typeof errorObj === "object") {
+      Object.assign(err, errorObj);
+    }
+    throw err;
+  }
+
+  try {
     const markdown =
       typeof parsed?.markdown === "string"
         ? parsed.markdown
@@ -107,7 +157,7 @@ export function processAntigravitySSEPayload(
             index: collected.toolCalls.length,
             type: "function",
             function: {
-              name: fc.name,
+              name: part.functionCall.name,
               arguments: JSON.stringify(stripZeroWidth(fc.args ?? {})),
             },
           });

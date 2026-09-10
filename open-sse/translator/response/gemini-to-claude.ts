@@ -192,6 +192,41 @@ export function geminiToClaudeResponse(chunk, state) {
 
   // Handle Antigravity wrapper
   const response = chunk.response || chunk;
+
+  // Mid-stream Gemini API error: handle error envelopes (top-level or nested)
+  // so the stream terminates cleanly with state.upstreamError instead of hanging or returning empty content.
+  const errorObj = response?.error || chunk?.error;
+  if (errorObj) {
+    const rawCode = typeof errorObj === "object" ? errorObj.code : undefined;
+    const rawStatus = typeof errorObj === "object" ? errorObj.status : undefined;
+    const status =
+      typeof rawCode === "number" && rawCode >= 400 && rawCode <= 599
+        ? rawCode
+        : rawStatus === "RESOURCE_EXHAUSTED"
+          ? 429
+          : 502;
+    const message =
+      typeof errorObj === "object" && typeof errorObj.message === "string"
+        ? errorObj.message
+        : typeof errorObj === "string"
+          ? errorObj
+          : "Gemini upstream failure";
+    if (state) {
+      state.upstreamError = {
+        status,
+        type: status === 429 ? "rate_limit_error" : "server_error",
+        code:
+          typeof rawStatus === "string" && rawStatus
+            ? rawStatus
+            : status === 429
+              ? "rate_limit_exceeded"
+              : "bad_gateway",
+        message,
+      };
+    }
+    return null;
+  }
+
   if (!response || !response.candidates?.[0]) return null;
 
   const results = [];
