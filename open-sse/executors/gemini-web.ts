@@ -459,13 +459,23 @@ export function mergeRotatedGeminiCookies(
   return merged.map(({ name, value }) => `${name}=${value}`).join("; ");
 }
 
-function resolveGeminiWebCookie(credentials: ExecuteInput["credentials"]): string {
+export function resolveGeminiWebCookie(
+  credentials?: ExecuteInput["credentials"] | Record<string, unknown> | null
+): string {
+  const creds = (credentials ?? {}) as Record<string, unknown>;
+  const nestedCreds =
+    creds.credentials && typeof creds.credentials === "object" && !Array.isArray(creds.credentials)
+      ? (creds.credentials as Record<string, unknown>)
+      : undefined;
+
   const directCookie =
-    readCredentialString(credentials?.apiKey) ||
-    readCredentialString((credentials as Record<string, unknown> | undefined)?.cookie);
+    readCredentialString(creds.apiKey) ||
+    readCredentialString(creds.cookie) ||
+    readCredentialString(nestedCreds?.apiKey) ||
+    readCredentialString(nestedCreds?.cookie);
   if (directCookie) return normalizeGeminiCookieInput(directCookie);
 
-  const providerSpecificData = credentials?.providerSpecificData;
+  const providerSpecificData = creds.providerSpecificData ?? nestedCreds?.providerSpecificData;
   const cookie = readProviderSpecificString(providerSpecificData, ["cookie"]);
   if (cookie) return normalizeGeminiCookieInput(cookie);
 
