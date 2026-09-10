@@ -1,6 +1,7 @@
 import {
   BACKOFF_STEPS_MS,
   EXECUTOR_CONTRACT_VIOLATION_CODE,
+  GEMINI_DEEP_THINK_TIMEOUT_CODE,
   PROVIDER_PROFILES,
   RateLimitReason,
   HTTP_STATUS,
@@ -1696,6 +1697,17 @@ export function checkFallbackError(
       shouldFallback: false,
       cooldownMs: 0,
       reason: EXECUTOR_CONTRACT_VIOLATION_CODE,
+      skipProviderBreaker: true,
+    };
+  }
+
+  // Gemini Web Deep Think timeout is a terminal failure for the specific request.
+  // Do not fallback or penalize the account/connection or provider circuit breaker.
+  if (structuredError?.code === GEMINI_DEEP_THINK_TIMEOUT_CODE) {
+    return {
+      shouldFallback: false,
+      cooldownMs: 0,
+      reason: GEMINI_DEEP_THINK_TIMEOUT_CODE,
       skipProviderBreaker: true,
     };
   }

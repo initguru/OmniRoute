@@ -90,6 +90,35 @@ function resolveProviderTimeoutMs(executor: unknown): number {
   }
 }
 
+export const DEFAULT_GEMINI_DEEP_THINK_TIMEOUT_MS = 600_000;
+
+/**
+ * Resolves timeout for Gemini Web Deep Think requests.
+ * Precedence:
+ * 1. connectionTimeoutMs (bounded to 1..MAX_PROVIDER_SPECIFIC_TIMEOUT_MS)
+ * 2. process.env.OMNIROUTE_GEMINI_WEB_DEEP_THINK_TIMEOUT_MS (positive integer)
+ * 3. Default: 600_000 ms (10 minutes)
+ */
+export function resolveDeepThinkTimeoutMs(connectionTimeoutMs?: number): number {
+  if (
+    typeof connectionTimeoutMs === "number" &&
+    Number.isFinite(connectionTimeoutMs) &&
+    connectionTimeoutMs > 0
+  ) {
+    return Math.min(Math.floor(connectionTimeoutMs), MAX_PROVIDER_SPECIFIC_TIMEOUT_MS);
+  }
+
+  const envVal = process.env.OMNIROUTE_GEMINI_WEB_DEEP_THINK_TIMEOUT_MS;
+  if (envVal) {
+    const parsed = Number.parseInt(envVal, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.min(parsed, MAX_PROVIDER_SPECIFIC_TIMEOUT_MS);
+    }
+  }
+
+  return DEFAULT_GEMINI_DEEP_THINK_TIMEOUT_MS;
+}
+
 /** Per-connection operator timeout tier: reads
  *  `providerSpecificData.timeoutMs`, bounded to 1..86_400_000 ms.
  *  Returns undefined when absent or invalid so the chain falls through. */

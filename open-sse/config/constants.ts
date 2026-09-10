@@ -49,6 +49,9 @@ export const STREAM_READINESS_MAX_TIMEOUT_MS = upstreamTimeouts.streamReadinessM
 // account fallback detection cannot drift.
 export const ANTIGRAVITY_PRE_RESPONSE_TIMEOUT_CODE = "ANTIGRAVITY_PRE_RESPONSE_TIMEOUT";
 
+// Error code used when Gemini Web thinking phase exceeds the allocated deep think timeout.
+export const GEMINI_DEEP_THINK_TIMEOUT_CODE = "gemini_deep_think_timeout";
+
 // Heartbeat interval for synthetic SSE keepalive emission toward the downstream
 // client (Capy, Claude Code, OpenAI SDK, etc). Keeps strict proxies from
 // dropping the connection during long upstream thinking phases. Set to 0 to
