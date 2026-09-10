@@ -20,6 +20,8 @@ export const PROVIDER_LABEL: Record<string, string> = {
   "grok-cli": "Grok Build",
   zcode: "ZCode",
   zc: "ZCode",
+  "gemini-web": "Gemini Web",
+  gweb: "Gemini Web",
 };
 
 export const PROVIDER_ORDER: Record<string, number> = {
@@ -42,6 +44,8 @@ export const PROVIDER_ORDER: Record<string, number> = {
   "grok-cli": 17,
   zcode: 18,
   zc: 18,
+  "gemini-web": 19,
+  gweb: 19,
 };
 
 export const TIER_FILTERS = [

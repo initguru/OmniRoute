@@ -12,7 +12,7 @@ import { formatQuotaLabel } from "./utils";
  * `MAX_DYNAMIC_COLUMNS` quotas in the order returned by `parseQuotaData()`
  * and surface them as columns; everything else becomes "+N more".
  */
-const PROVIDER_COLUMNS: Record<string, string[]> = {
+export const PROVIDER_COLUMNS: Record<string, string[]> = {
   codex: [
     "session",
     "weekly",
@@ -30,6 +30,8 @@ const PROVIDER_COLUMNS: Record<string, string[]> = {
   "minimax-cn": ["session"],
   "kimi-coding": ["session", "weekly"],
   "command-code": ["five_hour", "weekly", "credits"],
+  "gemini-web": ["gemini-deep-think"],
+  gweb: ["gemini-deep-think"],
 };
 
 /** Hard cap for the dynamic schema (Antigravity and fallback providers). */

@@ -48,7 +48,7 @@ export { shouldAttemptRotatingRefresh } from "./providerLimits/credentialRefresh
 type JsonRecord = Record<string, unknown>;
 type SyncSource = "manual" | "scheduled";
 
-const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
+export const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   "glm",
   "glm-cn",
   "zai",
@@ -94,6 +94,9 @@ const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   // ZCode (Z.ai Coding Plan) Start Plan / billing balance
   "zcode",
   "zc",
+  // Gemini Web Deep Think quota
+  "gemini-web",
+  "gweb",
 ]);
 const DEFAULT_PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES = 70;
 const PROVIDER_LIMITS_AUTO_SYNC_SETTING_KEY = "provider_limits_auto_sync_last_run";

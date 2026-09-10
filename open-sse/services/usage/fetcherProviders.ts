@@ -89,6 +89,9 @@ export const USAGE_FETCHER_PROVIDERS = [
   // ZCode (Z.ai Coding Plan) Start Plan / billing balance
   "zcode",
   "zc",
+  // Gemini Web Deep Think quota
+  "gemini-web",
+  "gweb",
 ] as const;
 
 export type UsageFetcherProvider = (typeof USAGE_FETCHER_PROVIDERS)[number];

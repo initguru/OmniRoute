@@ -13,6 +13,7 @@ import { registerFreeModelQuotaFetcher } from "./freeModelQuotaFetcher.ts";
 import { registerGrokCliQuotaFetcher } from "./grokCliQuotaFetcher.ts";
 import { registerXaiOauthQuotaFetcher } from "./xaiOauthQuotaFetcher.ts";
 import { registerFirecrawlQuotaFetcher } from "./firecrawlQuotaFetcher.ts";
+import { registerGeminiWebQuotaFetcher } from "./geminiWebQuotaFetcher.ts";
 
 export function registerQuotaTrackersBatch(): void {
   registerAgentrouterQuotaFetcher();
@@ -21,6 +22,7 @@ export function registerQuotaTrackersBatch(): void {
   registerGrokCliQuotaFetcher();
   registerXaiOauthQuotaFetcher();
   registerFirecrawlQuotaFetcher();
+  registerGeminiWebQuotaFetcher();
 }
 
 // Side-effect registration at module load, mirroring the sibling

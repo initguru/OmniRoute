@@ -78,6 +78,7 @@ import { getConolUsage } from "./conolUsage.ts";
 import { getAgentrouterUsage } from "./usage/agentrouter.ts";
 import { getKilocodeUsage } from "./usage/kilocode.ts";
 import { getZCodeUsage } from "./usage/zcode.ts";
+import { getGeminiWebUsage } from "./usage/gemini-web.ts";
 
 type JsonRecord = Record<string, unknown>;
 type UsageProviderConnection = JsonRecord & {
@@ -225,6 +226,9 @@ export async function getUsageForProvider(
     case "zcode":
     case "zc":
       return await getZCodeUsage(id, apiKey, providerSpecificData);
+    case "gemini-web":
+    case "gweb":
+      return await getGeminiWebUsage(id || "", connection);
     default:
       return { message: `Usage API not implemented for ${provider}` };
   }

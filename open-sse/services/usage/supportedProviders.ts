@@ -85,4 +85,7 @@ export const USAGE_SUPPORTED_PROVIDERS: readonly string[] = [
   // ZCode (Z.ai Coding Plan) Start Plan / billing balance
   "zcode",
   "zc",
+  // Gemini Web Deep Think quota
+  "gemini-web",
+  "gweb",
 ];
