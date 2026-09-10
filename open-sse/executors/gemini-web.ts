@@ -38,6 +38,7 @@ import {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const GEMINI_URL = "https://gemini.google.com/app";
+export const DEFAULT_GEMINI_WEB_BUILD_LABEL = "boq_assistant-bard-web-server_20260907.07_p0";
 
 /**
  * Whether an error came from Playwright failing to launch because the browser binary is not
@@ -104,6 +105,34 @@ function clearCachedSession(cookie: string): void {
 
 export function clearGeminiWebSessionCache(): void {
   sessionCache.clear();
+}
+
+export function resolveStaticSessionTokens(
+  credentialsPsd?: Record<string, unknown> | null,
+  connectionPsd?: Record<string, unknown> | null
+): GeminiWebSessionTokens | null {
+  const rawAt =
+    credentialsPsd?.atToken ?? credentialsPsd?.at ?? connectionPsd?.atToken ?? connectionPsd?.at;
+  const rawFsid =
+    credentialsPsd?.fSid ?? credentialsPsd?.fsid ?? connectionPsd?.fSid ?? connectionPsd?.fsid;
+  const rawBl =
+    credentialsPsd?.buildLabel ??
+    credentialsPsd?.bl ??
+    connectionPsd?.buildLabel ??
+    connectionPsd?.bl;
+
+  const atToken = typeof rawAt === "string" && rawAt.trim().length > 0 ? rawAt.trim() : null;
+  const fSid = typeof rawFsid === "string" && rawFsid.trim().length > 0 ? rawFsid.trim() : null;
+
+  if (atToken && fSid) {
+    const buildLabel =
+      typeof rawBl === "string" && rawBl.trim().length > 0
+        ? rawBl.trim()
+        : DEFAULT_GEMINI_WEB_BUILD_LABEL;
+    return { atToken, fSid, buildLabel };
+  }
+
+  return null;
 }
 
 function sleepWithSignal(ms: number, signal?: AbortSignal | null): Promise<void> {
@@ -624,14 +653,21 @@ export class GeminiWebExecutor extends BaseExecutor {
         throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
       }
 
+      const credPsd = credentials?.providerSpecificData as Record<string, unknown> | undefined;
+      const connPsd = (
+        input as unknown as { connection?: { providerSpecificData?: Record<string, unknown> } }
+      )?.connection?.providerSpecificData;
+
       const timeoutMs = resolveDeepThinkTimeoutMs(
-        (credentials?.providerSpecificData as { timeoutMs?: number } | undefined)?.timeoutMs ??
-          (input as unknown as { connection?: { providerSpecificData?: { timeoutMs?: number } } })
-            ?.connection?.providerSpecificData?.timeoutMs
+        (credPsd as { timeoutMs?: number } | undefined)?.timeoutMs ??
+          (connPsd as { timeoutMs?: number } | undefined)?.timeoutMs
       );
 
-      // 1. Session bootstrap (cached or fresh)
-      let sessionTokens = getCachedSession(cookie);
+      // 1. Session tokens: static from providerSpecificData, cached, or bootstrap
+      let sessionTokens = resolveStaticSessionTokens(credPsd, connPsd);
+      if (!sessionTokens) {
+        sessionTokens = getCachedSession(cookie);
+      }
       if (!sessionTokens) {
         try {
           sessionTokens = await bootstrapGeminiWebSession(cookie, signal ?? undefined, {
@@ -745,8 +781,9 @@ export class GeminiWebExecutor extends BaseExecutor {
         const conversationId = envelope.conversationId;
         const pollStartTime = Date.now();
         const pollIntervalMs =
-          (credentials?.providerSpecificData as { pollIntervalMs?: number } | undefined)
-            ?.pollIntervalMs ?? 1500;
+          (credPsd as { pollIntervalMs?: number } | undefined)?.pollIntervalMs ??
+          (connPsd as { pollIntervalMs?: number } | undefined)?.pollIntervalMs ??
+          1500;
 
         while (true) {
           if (signal?.aborted) {

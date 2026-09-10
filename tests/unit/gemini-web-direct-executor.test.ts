@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import {
   GeminiWebExecutor,
   clearGeminiWebSessionCache,
+  resolveStaticSessionTokens,
+  DEFAULT_GEMINI_WEB_BUILD_LABEL,
 } from "../../open-sse/executors/gemini-web.ts";
 import { GEMINI_DEEP_THINK_TIMEOUT_CODE } from "../../open-sse/config/constants.ts";
 import type { ExecuteInput } from "../../open-sse/executors/base.ts";
@@ -468,5 +470,222 @@ describe("GeminiWebExecutor Direct API (gemini-deep-think)", () => {
     } as unknown as ExecuteInput);
     assert.equal(res3.response.status, 200);
     assert.equal(appFetchCount, 2, "/app must be re-fetched after cache clear");
+  });
+
+  it("resolves static session tokens from credentials.providerSpecificData and skips session bootstrap", async () => {
+    const urlsCalled: string[] = [];
+    let streamBodyCaptured = "";
+
+    const mockFetch = mock.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      urlsCalled.push(url);
+
+      if (url.includes("/app")) {
+        return new Response(MOCK_HTML_SESSION, {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+      if (url.includes("StreamGenerate")) {
+        streamBodyCaptured = typeof init?.body === "string" ? init.body : "";
+        return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+      }
+      if (url.includes("batchexecute")) {
+        return new Response(fixture.pollCompletedResponse, { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: { messages: [{ role: "user", content: "Static token test" }], stream: false },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: {
+          atToken: "static-at-token-123",
+          fSid: "static-fsid-456",
+          pollIntervalMs: 5,
+        },
+      },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+      fetch: mockFetch as unknown as typeof fetch,
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+    assert.ok(
+      !urlsCalled.some((u) => u.includes("/app")),
+      "Must skip /app bootstrap when static session tokens are provided"
+    );
+    const streamUrl = urlsCalled.find((u) => u.includes("StreamGenerate"));
+    assert.ok(streamUrl, "Must call StreamGenerate");
+    assert.ok(
+      streamUrl.includes("f.sid=static-fsid-456"),
+      "StreamGenerate URL must use static fSid"
+    );
+    assert.ok(
+      streamUrl.includes("bl=boq_assistant-bard-web-server_20260907.07_p0"),
+      "StreamGenerate URL must use default buildLabel when omitted"
+    );
+    assert.ok(
+      streamBodyCaptured.includes("at=static-at-token-123"),
+      "StreamGenerate body must use static atToken"
+    );
+  });
+
+  it("resolves static session tokens using alias keys (at, fsid, bl) and from input.connection.providerSpecificData", async () => {
+    const urlsCalled: string[] = [];
+
+    const mockFetch = mock.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      urlsCalled.push(url);
+
+      if (url.includes("StreamGenerate")) {
+        return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+      }
+      if (url.includes("batchexecute")) {
+        return new Response(fixture.pollCompletedResponse, { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: { messages: [{ role: "user", content: "Alias token test" }], stream: false },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+      },
+      connection: {
+        providerSpecificData: {
+          at: "alias-at-token",
+          fsid: "alias-fsid",
+          bl: "custom-build-label-999",
+          pollIntervalMs: 5,
+        },
+      },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+      fetch: mockFetch as unknown as typeof fetch,
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+    assert.ok(
+      !urlsCalled.some((u) => u.includes("/app")),
+      "Must skip /app bootstrap when static session tokens are provided via connection"
+    );
+    const streamUrl = urlsCalled.find((u) => u.includes("StreamGenerate"));
+    assert.ok(streamUrl, "Must call StreamGenerate");
+    assert.ok(streamUrl.includes("f.sid=alias-fsid"), "StreamGenerate URL must use alias fsid");
+    assert.ok(
+      streamUrl.includes("bl=custom-build-label-999"),
+      "StreamGenerate URL must use alias bl"
+    );
+  });
+
+  it("falls back to bootstrap if providerSpecificData has incomplete static tokens (only atToken)", async () => {
+    let appFetched = false;
+
+    const mockFetch = mock.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.includes("/app")) {
+        appFetched = true;
+        return new Response(MOCK_HTML_SESSION, {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+      if (url.includes("StreamGenerate")) {
+        return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+      }
+      if (url.includes("batchexecute")) {
+        return new Response(fixture.pollCompletedResponse, { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: { messages: [{ role: "user", content: "Incomplete token test" }], stream: false },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: {
+          atToken: "only-at-token",
+          pollIntervalMs: 5,
+        },
+      },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+      fetch: mockFetch as unknown as typeof fetch,
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+    assert.ok(appFetched, "Must proceed with /app bootstrap when static tokens are incomplete");
+  });
+
+  describe("resolveStaticSessionTokens", () => {
+    it("returns null when providerSpecificData is undefined or empty", () => {
+      assert.equal(resolveStaticSessionTokens(), null);
+      assert.equal(resolveStaticSessionTokens(null, null), null);
+      assert.equal(resolveStaticSessionTokens({}, {}), null);
+    });
+
+    it("returns null when atToken or fSid is missing or empty string", () => {
+      assert.equal(resolveStaticSessionTokens({ atToken: "   ", fSid: "valid-fsid" }), null);
+      assert.equal(resolveStaticSessionTokens({ atToken: "valid-at", fSid: "" }), null);
+      assert.equal(
+        resolveStaticSessionTokens({ atToken: 123 as unknown as string, fSid: "valid" }),
+        null
+      );
+    });
+
+    it("resolves canonical atToken and fSid with default buildLabel", () => {
+      const tokens = resolveStaticSessionTokens({
+        atToken: "my-at-token",
+        fSid: "my-fsid",
+      });
+      assert.deepEqual(tokens, {
+        atToken: "my-at-token",
+        fSid: "my-fsid",
+        buildLabel: DEFAULT_GEMINI_WEB_BUILD_LABEL,
+      });
+    });
+
+    it("resolves custom buildLabel or bl when provided", () => {
+      const withBuildLabel = resolveStaticSessionTokens({
+        atToken: "my-at",
+        fSid: "my-fsid",
+        buildLabel: "custom-build-label-1",
+      });
+      assert.equal(withBuildLabel?.buildLabel, "custom-build-label-1");
+
+      const withBl = resolveStaticSessionTokens({
+        at: "my-at",
+        fsid: "my-fsid",
+        bl: "custom-bl-2",
+      });
+      assert.equal(withBl?.buildLabel, "custom-bl-2");
+    });
+
+    it("resolves tokens across credentials and connection objects", () => {
+      const tokens = resolveStaticSessionTokens(
+        { at: "at-from-credentials" },
+        { fsid: "fsid-from-connection", bl: "bl-from-connection" }
+      );
+      assert.deepEqual(tokens, {
+        atToken: "at-from-credentials",
+        fSid: "fsid-from-connection",
+        buildLabel: "bl-from-connection",
+      });
+    });
   });
 });
