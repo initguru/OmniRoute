@@ -186,3 +186,23 @@ test("docs point to runtime-generated identity and keep bootstrap separate from 
     /bootstrap workaround|bootstrap[^\n]*(?:not|does not)[^\n]*(?:fingerprint|bypass)|fingerprint[^\n]*(?:not|does not)[^\n]*(?:bypass|workaround)/i
   );
 });
+
+test("canonical probe inputId and schema are synchronized between runtime contracts and manifests", () => {
+  const fixtureDir = resolve(ROOT, "tests/fixtures/antigravity-wire");
+  const probe = JSON.parse(
+    readFileSync(resolve(fixtureDir, "canonical-probe.json"), "utf8")
+  ) as { inputId: string; schemaVersion: number };
+
+  assert.equal(probe.inputId, "antigravity-canonical-probe-v1");
+  assert.equal(probe.schemaVersion, 1);
+
+  for (const profile of ANTIGRAVITY_CLIENT_PROFILE_VALUES) {
+    const manifest = JSON.parse(
+      readFileSync(resolve(fixtureDir, `${profile}-manifest.json`), "utf8")
+    ) as { inputId: string; contractId: string };
+    const contract = getAntigravityClientContract(profile);
+
+    assert.equal(manifest.inputId, probe.inputId);
+    assert.equal(manifest.contractId, contract.contractId);
+  }
+});

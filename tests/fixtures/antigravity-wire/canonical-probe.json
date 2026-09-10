@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "inputId": "antigravity-canonical-probe-v1",
+  "requestType": "content",
+  "modelFamily": "gemini-flash",
+  "stream": true,
+  "outputBudget": 1024,
+  "toolScenario": "single-function-call",
+  "promptRecipeId": "canonical-probe-text-v1",
+  "requiredSurfaces": [
+    "content",
+    "metadata"
+  ]
+}

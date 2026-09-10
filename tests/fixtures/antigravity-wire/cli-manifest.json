@@ -5,10 +5,35 @@
   "clientVersion": "unknown",
   "platform": "synthetic",
   "authMode": "consumer-oauth",
-  "binarySha256": "",
+  "inputId": "antigravity-canonical-probe-v1",
+  "inputSha256": "b22224e580317e9fded1c715868538ad46dd53b47d23662fae5901f8f36a5db5",
+  "binarySha256": "synthetic",
+  "signer": {
+    "kind": "operator-attested",
+    "id": "synthetic",
+    "verified": false
+  },
   "capturedAt": "1970-01-01T00:00:00.000Z",
   "source": "synthetic-only",
   "surfaces": ["oauth", "bootstrap", "content", "usage", "credits", "image", "mitm"],
+  "observations": [
+    {
+      "method": "POST",
+      "path": "/v1internal:generateContent",
+      "headerNames": [
+        "content-type",
+        "user-agent",
+        "authorization"
+      ],
+      "bodyStructuralShape": {
+        "project": "string",
+        "model": "string",
+        "request": {
+          "contents": "array"
+        }
+      }
+    }
+  ],
   "dynamicRules": [
     {
       "path": "/headers/2/1",

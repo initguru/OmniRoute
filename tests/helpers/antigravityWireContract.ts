@@ -26,6 +26,31 @@ export type AntigravityStructuralSummary = {
   headerNames: readonly string[];
 };
 
+export type AntigravitySigner = {
+  kind: "operator-attested" | "binary-signature";
+  id: string;
+  verified: boolean;
+};
+
+export type AntigravityStructuralObservation = {
+  method: string;
+  path: string;
+  headerNames: readonly string[];
+  bodyStructuralShape: Record<string, unknown>;
+};
+
+export type AntigravityCanonicalProbe = {
+  schemaVersion: number;
+  inputId: string;
+  requestType: string;
+  modelFamily: string;
+  stream: boolean;
+  outputBudget: number;
+  toolScenario: string;
+  promptRecipeId: string;
+  requiredSurfaces: readonly string[];
+};
+
 export type AntigravityReferenceManifest = {
   contractId: string;
   profile: AntigravityProfileId;
@@ -33,10 +58,14 @@ export type AntigravityReferenceManifest = {
   clientVersion: string;
   platform: string;
   authMode: "consumer-oauth";
+  inputId?: string;
+  inputSha256?: string;
   binarySha256: string;
+  signer?: AntigravitySigner;
   capturedAt: string;
   source: "operator-approved-capture" | "synthetic-only";
   surfaces: readonly ("oauth" | "bootstrap" | "content" | "usage" | "credits" | "image" | "mitm")[];
+  observations?: readonly AntigravityStructuralObservation[];
   dynamicRules: readonly AntigravityDynamicRule[];
 };
 
@@ -90,9 +119,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const REDACTED = /^(?:\[redacted\]|\[masked\]|<redacted>|<masked>|redacted|masked)$/i;
 const SENSITIVE_NAME =
-  /authorization|proxyauthorization|cookie|setcookie|token|secret|apikey|prompt|machineid|session/i;
+  /authorization|proxyauthorization|cookie|setcookie|token|secret|apikey|prompt|machineid|session|project|account/i;
 const RAW_ARTIFACT_CONTAINER =
-  /^(?:body|body[-_]?utf8|request|response|observations?|rpc[-_]?results?|logs?|raw(?:[-_]?request|[-_]?response|[-_]?headers?))$/i;
+  /^(?:body|body[-_]?utf8|request|response|rpc[-_]?results?|logs?|raw(?:[-_]?request|[-_]?response|[-_]?headers?))$/i;
 const STRUCTURAL_DIGEST_PREFIX = "structural-sha256:";
 
 function difference(
@@ -337,6 +366,7 @@ function isRedactionMarker(value: unknown): boolean {
 
 function isSensitiveName(value: string): boolean {
   const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (normalized === "promptrecipeid") return false;
   return SENSITIVE_NAME.test(normalized);
 }
 
@@ -353,7 +383,9 @@ export function assertRedactedAntigravityArtifact(value: unknown): void {
   const seen = new WeakSet<object>();
   const visit = (current: unknown, path: string, key?: string): void => {
     if (key && RAW_ARTIFACT_CONTAINER.test(key)) {
-      throw new Error(`Antigravity artifact contains an unredacted wire payload at ${path}`);
+      if (!path.includes("/bodyStructuralShape")) {
+        throw new Error(`Antigravity artifact contains an unredacted wire payload at ${path}`);
+      }
     }
     if (key && /^structuralDigest$/i.test(key)) {
       const root =
@@ -369,6 +401,11 @@ export function assertRedactedAntigravityArtifact(value: unknown): void {
       return;
     }
     if (key && isSensitiveName(key)) {
+      if (path.includes("/bodyStructuralShape/")) {
+        if (typeof current === "string" && ["string", "number", "boolean", "array", "object"].includes(current)) {
+          return;
+        }
+      }
       assertRedactedValue(current, path);
       return;
     }
@@ -545,3 +582,89 @@ export function compareObservedRequests(
   }
   return differences;
 }
+
+export function computeAntigravityCanonicalProbeSha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+export function validateAntigravityCanonicalProbe(probe: unknown): asserts probe is AntigravityCanonicalProbe {
+  if (!probe || typeof probe !== "object" || Array.isArray(probe)) {
+    throw new Error("Invalid Antigravity canonical probe: not an object");
+  }
+  const candidate = probe as Record<string, unknown>;
+  if (typeof candidate.schemaVersion !== "number" || candidate.schemaVersion < 1) {
+    throw new Error("Invalid Antigravity canonical probe: schemaVersion must be a positive number");
+  }
+  if (typeof candidate.inputId !== "string" || candidate.inputId.trim().length === 0) {
+    throw new Error("Invalid Antigravity canonical probe: missing or empty inputId");
+  }
+  if (typeof candidate.requestType !== "string" || candidate.requestType.trim().length === 0) {
+    throw new Error("Invalid Antigravity canonical probe: missing or empty requestType");
+  }
+  if (typeof candidate.modelFamily !== "string" || candidate.modelFamily.trim().length === 0) {
+    throw new Error("Invalid Antigravity canonical probe: missing or empty modelFamily");
+  }
+  if (typeof candidate.stream !== "boolean") {
+    throw new Error("Invalid Antigravity canonical probe: stream must be a boolean");
+  }
+  if (typeof candidate.outputBudget !== "number" || candidate.outputBudget <= 0) {
+    throw new Error("Invalid Antigravity canonical probe: outputBudget must be a positive number");
+  }
+  if (typeof candidate.toolScenario !== "string" || candidate.toolScenario.trim().length === 0) {
+    throw new Error("Invalid Antigravity canonical probe: missing or empty toolScenario");
+  }
+  if (typeof candidate.promptRecipeId !== "string" || candidate.promptRecipeId.trim().length === 0) {
+    throw new Error("Invalid Antigravity canonical probe: missing or empty promptRecipeId");
+  }
+  if (!Array.isArray(candidate.requiredSurfaces) || candidate.requiredSurfaces.some((s) => typeof s !== "string")) {
+    throw new Error("Invalid Antigravity canonical probe: requiredSurfaces must be an array of strings");
+  }
+}
+
+export function validateAntigravityReferenceManifest(manifest: unknown): asserts manifest is AntigravityReferenceManifest {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("Invalid Antigravity reference manifest: not an object");
+  }
+  const candidate = manifest as Record<string, unknown>;
+  if (typeof candidate.contractId !== "string" || candidate.contractId.trim().length === 0) {
+    throw new Error("Invalid Antigravity reference manifest: missing contractId");
+  }
+  if (candidate.profile !== "cli" && candidate.profile !== "ide") {
+    throw new Error("Invalid Antigravity reference manifest: invalid profile");
+  }
+  if (candidate.product !== "agy-cli" && candidate.product !== "antigravity-ide") {
+    throw new Error("Invalid Antigravity reference manifest: invalid product");
+  }
+  if (typeof candidate.binarySha256 !== "string") {
+    throw new Error("Invalid Antigravity reference manifest: binarySha256 must be a string");
+  }
+  if (candidate.signer !== undefined && candidate.signer !== null) {
+    if (typeof candidate.signer !== "object" || Array.isArray(candidate.signer)) {
+      throw new Error("Invalid Antigravity reference manifest: invalid signer object");
+    }
+    const signer = candidate.signer as Record<string, unknown>;
+    if (typeof signer.kind !== "string" || typeof signer.id !== "string" || typeof signer.verified !== "boolean") {
+      throw new Error("Invalid Antigravity reference manifest: invalid signer fields");
+    }
+  }
+  if (candidate.observations !== undefined && candidate.observations !== null) {
+    if (!Array.isArray(candidate.observations)) {
+      throw new Error("Invalid Antigravity reference manifest: observations must be an array");
+    }
+    for (const obs of candidate.observations) {
+      if (!obs || typeof obs !== "object" || Array.isArray(obs)) {
+        throw new Error("Invalid observation in manifest");
+      }
+      if (typeof obs.method !== "string" || typeof obs.path !== "string") {
+        throw new Error("Invalid observation method or path in manifest");
+      }
+      if (!Array.isArray(obs.headerNames) || obs.headerNames.some((h: unknown) => typeof h !== "string")) {
+        throw new Error("Invalid observation headerNames in manifest");
+      }
+      if (!obs.bodyStructuralShape || typeof obs.bodyStructuralShape !== "object" || Array.isArray(obs.bodyStructuralShape)) {
+        throw new Error("Invalid observation bodyStructuralShape in manifest");
+      }
+    }
+  }
+}
+

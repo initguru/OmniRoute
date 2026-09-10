@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import {
   assertRedactedAntigravityArtifact,
   compareObservedRequests,
+  computeAntigravityCanonicalProbeSha256,
   createAntigravityStructuralDigest,
+  validateAntigravityCanonicalProbe,
+  validateAntigravityReferenceManifest,
+  type AntigravityCanonicalProbe,
   type AntigravityObservedRequest,
   type AntigravityReferenceManifest,
   type AntigravityStructuralSummary,
@@ -225,11 +229,17 @@ test("redaction guard accepts structural summaries and rejects sensitive raw val
     { authorization: "Bearer raw-access-token" },
     { AUTHORIZATION: "Bearer raw-access-token" },
     { refresh_token: "raw-refresh-token" },
+    { token: "raw-token" },
     { API_KEY: "raw-api-key" },
     { APIKey: "raw-api-key" },
     { "X-API-Key": "raw-api-key" },
     { headers: [["Cookie", "session=raw-cookie"]] },
     { body: { prompt: "private prompt" } },
+    { prompt: "raw-prompt" },
+    { project: "raw-project-id" },
+    { projectId: "raw-project-id" },
+    { account: "raw-account-id" },
+    { accountId: "raw-account-id" },
     { projectSecret: "raw-project-secret" },
     { MACHINE_ID: "raw-machine-id" },
     { machineID: "raw-machine-id" },
@@ -239,6 +249,88 @@ test("redaction guard accepts structural summaries and rejects sensitive raw val
   ]) {
     assert.throws(() => assertRedactedAntigravityArtifact(value), /redact/i);
   }
+});
+
+test("canonical probe fixture adheres to schema and validation helper verifies integrity", () => {
+  const fixtureDir = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../fixtures/antigravity-wire"
+  );
+  const probePath = path.join(fixtureDir, "canonical-probe.json");
+  const rawProbe = fs.readFileSync(probePath, "utf8");
+  const probe = JSON.parse(rawProbe) as AntigravityCanonicalProbe;
+
+  assert.equal(probe.schemaVersion, 1);
+  assert.equal(probe.inputId, "antigravity-canonical-probe-v1");
+  assert.equal(probe.requestType, "content");
+  assert.equal(probe.modelFamily, "gemini-flash");
+  assert.equal(probe.stream, true);
+  assert.equal(probe.outputBudget, 1024);
+  assert.equal(probe.toolScenario, "single-function-call");
+  assert.equal(probe.promptRecipeId, "canonical-probe-text-v1");
+  assert.deepEqual(probe.requiredSurfaces, ["content", "metadata"]);
+  assert.equal((probe as Record<string, unknown>).prompt, undefined);
+  assert.equal((probe as Record<string, unknown>).contents, undefined);
+
+  assert.doesNotThrow(() => validateAntigravityCanonicalProbe(probe));
+  assert.doesNotThrow(() => assertRedactedAntigravityArtifact(probe));
+
+  const probeHash = computeAntigravityCanonicalProbeSha256(rawProbe);
+  assert.match(probeHash, /^[0-9a-f]{64}$/);
+});
+
+test("manifest schema enforces canonical probe inputId, inputSha256, signer, and redacted observations", () => {
+  const fixtureDir = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../fixtures/antigravity-wire"
+  );
+  const probeRaw = fs.readFileSync(path.join(fixtureDir, "canonical-probe.json"), "utf8");
+  const expectedSha256 = computeAntigravityCanonicalProbeSha256(probeRaw);
+
+  const cli = JSON.parse(
+    fs.readFileSync(path.join(fixtureDir, "cli-manifest.json"), "utf8")
+  ) as AntigravityReferenceManifest;
+  const ide = JSON.parse(
+    fs.readFileSync(path.join(fixtureDir, "ide-manifest.json"), "utf8")
+  ) as AntigravityReferenceManifest;
+
+  for (const manifest of [cli, ide]) {
+    assert.equal(manifest.inputId, "antigravity-canonical-probe-v1");
+    assert.equal(manifest.inputSha256, expectedSha256);
+    assert.equal(manifest.binarySha256, "synthetic");
+    assert.deepEqual(manifest.signer, {
+      kind: "operator-attested",
+      id: "synthetic",
+      verified: false,
+    });
+    assert.ok(Array.isArray(manifest.observations));
+    assert.ok(manifest.observations.length > 0);
+    for (const obs of manifest.observations) {
+      assert.equal(typeof obs.method, "string");
+      assert.equal(typeof obs.path, "string");
+      assert.ok(Array.isArray(obs.headerNames));
+      assert.equal(typeof obs.bodyStructuralShape, "object");
+    }
+    assert.doesNotThrow(() => validateAntigravityReferenceManifest(manifest));
+    assert.doesNotThrow(() => assertRedactedAntigravityArtifact(manifest));
+  }
+});
+
+test("compareObservedRequests diffs remain strictly value-free", () => {
+  const expected = request('{"contents":[],"secretValue":"sensitive-alpha"}');
+  const actual = request('{"contents":[],"secretValue":"sensitive-beta"}');
+  const differences = compareObservedRequests(expected, actual);
+  assert.ok(differences.length > 0);
+  for (const diff of differences) {
+    assert.equal(typeof diff.path, "string");
+    assert.ok(["http", "header", "body", "lifecycle", "transport"].includes(diff.category));
+    assert.equal(typeof diff.reason, "string");
+    assert.equal((diff as Record<string, unknown>).expected, undefined);
+    assert.equal((diff as Record<string, unknown>).actual, undefined);
+    assert.equal((diff as Record<string, unknown>).value, undefined);
+  }
+  const serialized = JSON.stringify(differences);
+  assert.doesNotMatch(serialized, /sensitive-alpha|sensitive-beta/);
 });
 
 test("CLI and IDE manifests remain separate synthetic-only profiles", () => {
