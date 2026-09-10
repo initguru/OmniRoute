@@ -18,6 +18,13 @@ export const gemini_webProvider: RegistryEntry = {
   // on the provider constant (src/shared/constants/providers/web-cookie.ts).
   models: [
     {
+      id: "gemini-deep-think",
+      name: "Gemini Deep Think",
+      toolCalling: false,
+      supportsReasoning: true,
+      timeoutMs: 600_000,
+    },
+    {
       id: "gemini-3.1-pro",
       name: "Gemini 3.1 Pro",
       toolCalling: false,

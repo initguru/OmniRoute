@@ -215,7 +215,7 @@ test("#9356 a supported request still falls through the guard untouched", async 
 
 // ─── Catalog metadata ───────────────────────────────────────────────────────
 
-test("#9356 registry advertises no native tool calling and no reasoning for gemini-web", () => {
+test("#9356 registry advertises no native tool calling and no reasoning for legacy gemini-web models", () => {
   assert.ok(gemini_webProvider.models.length > 0);
   for (const model of gemini_webProvider.models) {
     assert.equal(
@@ -223,23 +223,27 @@ test("#9356 registry advertises no native tool calling and no reasoning for gemi
       false,
       `${model.id} must not advertise native tool calling — /v1/models feeds agent routers`
     );
-    assert.equal(
-      model.supportsReasoning,
-      false,
-      `${model.id} must advertise reasoning:false so agent routers stop selecting it for ` +
-        "reasoning work (the executor has no thinking control to drive)"
-    );
+    if (model.id !== "gemini-deep-think") {
+      assert.equal(
+        model.supportsReasoning,
+        false,
+        `${model.id} must advertise reasoning:false so agent routers stop selecting it for ` +
+          "reasoning work (the executor has no thinking control to drive)"
+      );
+    }
   }
 });
 
-test("#9356 resolved capabilities — not just the raw registry — report no reasoning/tools", () => {
+test("#9356 resolved capabilities — not just the raw registry — report no reasoning/tools for legacy models", () => {
   // The registry literal is only the input; `getResolvedModelCapabilities` is what
   // the catalog, the combo compatibility filter and the thinking-budget translator
   // actually read. Assert the resolved view so a downstream default cannot quietly
   // re-advertise a capability the executor does not have.
   for (const model of gemini_webProvider.models) {
     const input = { provider: "gemini-web", model: model.id };
-    assert.equal(supportsReasoning(input), false, `${model.id} resolved reasoning must be false`);
+    if (model.id !== "gemini-deep-think") {
+      assert.equal(supportsReasoning(input), false, `${model.id} resolved reasoning must be false`);
+    }
     assert.equal(
       supportsToolCalling(input),
       false,

@@ -39,6 +39,9 @@ export const GEMINI_WEB_UNSUPPORTED_CONTROL_CODE = "unsupported_control_for_prov
 /** Effort levels a non-thinking provider already complies with. */
 const SATISFIED_EFFORT_LEVELS = new Set(["none", "minimal"]);
 
+/** Reasoning effort levels allowed for gemini-deep-think. */
+const DEEP_THINK_ALLOWED_EFFORTS = new Set(["high", "max", "xhigh"]);
+
 /** `tool_choice` strings that demand a tool call rather than merely offering one. */
 const FORCING_TOOL_CHOICE_STRINGS = new Set(["required", "any"]);
 
@@ -90,11 +93,24 @@ export function requestsThinkingBudget(reasoningEffort: unknown): boolean {
  * request carrying both is rejected either way.
  */
 export function checkGeminiWebUnsupportedControls(
-  body: Record<string, unknown> | null | undefined
+  body: Record<string, unknown> | null | undefined,
+  model?: string | null
 ): GeminiWebCapabilityViolation | null {
   if (!body || typeof body !== "object") return null;
 
-  if (requestsThinkingBudget(body.reasoning_effort)) {
+  const resolvedModel = normalizeString(model) ?? normalizeString(body.model);
+
+  if (resolvedModel === "gemini-deep-think") {
+    const effort = normalizeString(body.reasoning_effort);
+    if (effort !== null && !DEEP_THINK_ALLOWED_EFFORTS.has(effort)) {
+      return {
+        param: "reasoning_effort",
+        message:
+          'Model "gemini-deep-think" requires deep reasoning and only supports "high", "max", or "xhigh" effort (or omitted). ' +
+          `Reasoning effort "${effort}" cannot be honored on this model.`,
+      };
+    }
+  } else if (requestsThinkingBudget(body.reasoning_effort)) {
     return {
       param: "reasoning_effort",
       message:
