@@ -22,12 +22,18 @@ import {
   checkGeminiWebUnsupportedControls,
   GEMINI_WEB_UNSUPPORTED_CONTROL_CODE,
 } from "./gemini-web/capabilities.ts";
-import {
-  runGeminiDeepThinkUiStateMachine,
-  GeminiWebUiStateError,
-} from "./gemini-web/browserAutomation.ts";
 import { resolveDeepThinkTimeoutMs } from "../handlers/chatCore/upstreamTimeouts.ts";
 import { GEMINI_DEEP_THINK_TIMEOUT_CODE } from "../config/constants.ts";
+import {
+  GEMINI_DEEP_THINK_MODEL_ID,
+  buildModelHeaders,
+  buildStreamGenerateBody,
+  parseStreamGenerateEnvelope,
+  buildPollRequestBody,
+  parsePollResponse,
+  bootstrapGeminiWebSession,
+  type GeminiWebSessionTokens,
+} from "./gemini-web/directProtocol.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -51,6 +57,77 @@ export function isMissingBrowserExecutable(message: string): boolean {
 }
 const GEMINI_USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+
+// ─── Direct API Session Cache ───────────────────────────────────────────────
+
+interface CachedGeminiWebSession {
+  tokens: GeminiWebSessionTokens;
+  expiresAt: number;
+}
+
+const sessionCache = new Map<string, CachedGeminiWebSession>();
+const SESSION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedSession(cookie: string): GeminiWebSessionTokens | null {
+  const cached = sessionCache.get(cookie);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.tokens;
+  }
+  if (cached) {
+    sessionCache.delete(cookie);
+  }
+  return null;
+}
+
+function setCachedSession(cookie: string, tokens: GeminiWebSessionTokens): void {
+  if (sessionCache.size > 100) {
+    const now = Date.now();
+    for (const [key, value] of sessionCache.entries()) {
+      if (value.expiresAt <= now) {
+        sessionCache.delete(key);
+      }
+    }
+    if (sessionCache.size > 100) {
+      const oldestKey = sessionCache.keys().next().value;
+      if (oldestKey) sessionCache.delete(oldestKey);
+    }
+  }
+  sessionCache.set(cookie, {
+    tokens,
+    expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+  });
+}
+
+function clearCachedSession(cookie: string): void {
+  sessionCache.delete(cookie);
+}
+
+export function clearGeminiWebSessionCache(): void {
+  sessionCache.clear();
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      signal.reason instanceof Error ? signal.reason : new Error("Request aborted")
+    );
+  }
+  if (ms <= 0) return Promise.resolve();
+
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("Request aborted"));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -432,6 +509,451 @@ export class GeminiWebExecutor extends BaseExecutor {
     }
   }
 
+  private async persistRotatedCookiesFromHeaders(
+    headers: Headers,
+    cookie: string,
+    credentials: ExecuteInput["credentials"],
+    onCredentialsRefreshed: ExecuteInput["onCredentialsRefreshed"],
+    log: ExecuteInput["log"]
+  ): Promise<void> {
+    if (!onCredentialsRefreshed) return;
+    try {
+      const getSetCookie = (headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+      const setCookies =
+        typeof getSetCookie === "function"
+          ? getSetCookie.call(headers)
+          : ([headers.get("set-cookie")].filter(Boolean) as string[]);
+      if (setCookies.length === 0) return;
+
+      const jarCookies = setCookies.flatMap((header) => parseCookies(header));
+      const mergedCookie = mergeRotatedGeminiCookies(cookie, jarCookies);
+      if (mergedCookie && mergedCookie !== cookie) {
+        await onCredentialsRefreshed({ ...credentials, apiKey: mergedCookie });
+      }
+    } catch (err) {
+      log?.warn?.(
+        "GEMINI-WEB",
+        `Failed to persist rotated cookie from headers: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async buildFormattedResponse(params: {
+    responseText: string;
+    modelId: string;
+    hasTools: boolean;
+    requestedTools: unknown;
+    stream: boolean;
+    body: unknown;
+  }) {
+    const { responseText, modelId, hasTools, requestedTools, stream, body } = params;
+
+    if (hasTools) {
+      const cid = `chatcmpl-gwe-${crypto.randomUUID().slice(0, 12)}`;
+      const created = Math.floor(Date.now() / 1000);
+      const toolResponse = await buildGeminiToolResponse(
+        responseText,
+        requestedTools,
+        stream,
+        modelId,
+        cid,
+        created
+      );
+      return { response: toolResponse, url: GEMINI_URL, headers: {}, transformedBody: body };
+    }
+
+    if (stream) {
+      const encoder = new TextEncoder();
+      const readable = new ReadableStream(
+        {
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify(formatStreamChunk(responseText, modelId))}\n\n`
+              )
+            );
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(formatStreamChunk("", modelId, "stop"))}\n\n`)
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        },
+        { highWaterMark: 16384 }
+      );
+      return {
+        response: new Response(readable, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
+        }),
+        url: GEMINI_URL,
+        headers: {},
+        transformedBody: body,
+      };
+    }
+
+    return {
+      response: new Response(JSON.stringify(formatChatCompletion(responseText, modelId)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      url: GEMINI_URL,
+      headers: {},
+      transformedBody: body,
+    };
+  }
+
+  private async executeDirectDeepThink(params: {
+    input: ExecuteInput;
+    cookie: string;
+    prompt: string;
+    modelId: string;
+    hasTools: boolean;
+    requestedTools: unknown;
+  }) {
+    const { input, cookie, prompt, modelId, hasTools, requestedTools } = params;
+    const { body, stream, credentials, signal, log, onCredentialsRefreshed } = input;
+    const fetchFn = (input as { fetch?: typeof fetch }).fetch ?? fetch;
+
+    try {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+      }
+
+      const timeoutMs = resolveDeepThinkTimeoutMs(
+        (credentials?.providerSpecificData as { timeoutMs?: number } | undefined)?.timeoutMs ??
+          (input as unknown as { connection?: { providerSpecificData?: { timeoutMs?: number } } })
+            ?.connection?.providerSpecificData?.timeoutMs
+      );
+
+      // 1. Session bootstrap (cached or fresh)
+      let sessionTokens = getCachedSession(cookie);
+      if (!sessionTokens) {
+        try {
+          sessionTokens = await bootstrapGeminiWebSession(cookie, signal ?? undefined, {
+            fetchFn,
+            timeoutMs: Math.min(timeoutMs, 15000),
+          });
+          setCachedSession(cookie, sessionTokens);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log?.warn?.("GEMINI-WEB", `Failed to bootstrap Gemini Web session: ${msg}`);
+          return {
+            response: new Response(
+              JSON.stringify(
+                buildErrorBody(401, sanitizeErrorMessage(msg), null, {
+                  type: "authentication_error",
+                  code: "gemini_web_auth_required",
+                })
+              ),
+              {
+                status: 401,
+                headers: { "Content-Type": "application/json" },
+              }
+            ),
+            url: GEMINI_URL,
+            headers: {},
+            transformedBody: body,
+          };
+        }
+      }
+
+      const { atToken, fSid, buildLabel } = sessionTokens;
+
+      // 2. StreamGenerate request
+      const streamReqId = Math.floor(Math.random() * 900000) + 100000;
+      const streamUrl = `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=${encodeURIComponent(buildLabel)}&f.sid=${encodeURIComponent(fSid)}&hl=en&_reqid=${streamReqId}&rt=c`;
+
+      const streamBodyParams = buildStreamGenerateBody(prompt, { atToken });
+      const streamHeaders: Record<string, string> = {
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "x-same-domain": "1",
+        Cookie: cookie,
+        ...buildModelHeaders(GEMINI_DEEP_THINK_MODEL_ID),
+      };
+
+      const streamResp = await fetchFn(streamUrl, {
+        method: "POST",
+        headers: streamHeaders,
+        body: streamBodyParams.toString(),
+        signal: signal ?? undefined,
+      });
+
+      if (!streamResp.ok) {
+        clearCachedSession(cookie);
+        const isAuthErr = streamResp.status === 401 || streamResp.status === 403;
+        const status = isAuthErr ? 401 : streamResp.status >= 500 ? 502 : streamResp.status;
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(
+                status,
+                `Gemini StreamGenerate error: HTTP ${streamResp.status}`,
+                null,
+                {
+                  type: isAuthErr ? "authentication_error" : "server_error",
+                  code: isAuthErr ? "gemini_web_auth_required" : "upstream_error",
+                }
+              )
+            ),
+            { status, headers: { "Content-Type": "application/json" } }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      await this.persistRotatedCookiesFromHeaders(
+        streamResp.headers,
+        cookie,
+        credentials,
+        onCredentialsRefreshed,
+        log
+      );
+
+      const rawStreamText = await streamResp.text();
+      const envelope = parseStreamGenerateEnvelope(rawStreamText);
+
+      if (envelope.error && !envelope.conversationId) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(502, envelope.error, null, {
+                type: "server_error",
+                code: "gemini_deep_think_generation_failed",
+              })
+            ),
+            { status: 502, headers: { "Content-Type": "application/json" } }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      let finalResponseText = "";
+
+      if (!envelope.isPending && envelope.initialText) {
+        finalResponseText = envelope.initialText;
+      } else {
+        // 3. Polling loop for hNvQHb
+        const conversationId = envelope.conversationId;
+        const pollStartTime = Date.now();
+        const pollIntervalMs =
+          (credentials?.providerSpecificData as { pollIntervalMs?: number } | undefined)
+            ?.pollIntervalMs ?? 1500;
+
+        while (true) {
+          if (signal?.aborted) {
+            throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+          }
+
+          const elapsedMs = Date.now() - pollStartTime;
+          if (elapsedMs >= timeoutMs) {
+            return {
+              response: new Response(
+                JSON.stringify(
+                  buildErrorBody(504, `Gemini Deep Think timed out after ${timeoutMs}ms`, null, {
+                    type: "timeout_error",
+                    code: GEMINI_DEEP_THINK_TIMEOUT_CODE,
+                  })
+                ),
+                { status: 504, headers: { "Content-Type": "application/json" } }
+              ),
+              url: GEMINI_URL,
+              headers: {},
+              transformedBody: body,
+            };
+          }
+
+          const remainingTime = timeoutMs - elapsedMs;
+          const sleepTime = Math.min(pollIntervalMs, remainingTime);
+          await sleepWithSignal(sleepTime, signal ?? undefined);
+
+          const pollReqId = Math.floor(Math.random() * 900000) + 100000;
+          const pollUrl = `https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=hNvQHb&source-path=%2Fapp%2F${encodeURIComponent(conversationId)}&bl=${encodeURIComponent(buildLabel)}&f.sid=${encodeURIComponent(fSid)}&hl=en&_reqid=${pollReqId}&rt=c`;
+
+          const pollParams = buildPollRequestBody(conversationId, atToken);
+          const pollHeaders: Record<string, string> = {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            Cookie: cookie,
+            "x-same-domain": "1",
+          };
+
+          const pollResp = await fetchFn(pollUrl, {
+            method: "POST",
+            headers: pollHeaders,
+            body: pollParams.toString(),
+            signal: signal ?? undefined,
+          });
+
+          if (!pollResp.ok) {
+            if (pollResp.status === 401 || pollResp.status === 403) {
+              clearCachedSession(cookie);
+              return {
+                response: new Response(
+                  JSON.stringify(
+                    buildErrorBody(
+                      401,
+                      `Gemini poll session expired: HTTP ${pollResp.status}`,
+                      null,
+                      {
+                        type: "authentication_error",
+                        code: "gemini_web_auth_required",
+                      }
+                    )
+                  ),
+                  { status: 401, headers: { "Content-Type": "application/json" } }
+                ),
+                url: GEMINI_URL,
+                headers: {},
+                transformedBody: body,
+              };
+            }
+            continue;
+          }
+
+          await this.persistRotatedCookiesFromHeaders(
+            pollResp.headers,
+            cookie,
+            credentials,
+            onCredentialsRefreshed,
+            log
+          );
+
+          const pollRawText = await pollResp.text();
+          const pollResult = parsePollResponse(pollRawText);
+
+          if (pollResult.isFailed) {
+            return {
+              response: new Response(
+                JSON.stringify(
+                  buildErrorBody(
+                    502,
+                    pollResult.error || "Gemini Deep Think generation failed",
+                    null,
+                    {
+                      type: "server_error",
+                      code: "gemini_deep_think_generation_failed",
+                    }
+                  )
+                ),
+                { status: 502, headers: { "Content-Type": "application/json" } }
+              ),
+              url: GEMINI_URL,
+              headers: {},
+              transformedBody: body,
+            };
+          }
+
+          if (!pollResult.isPending && pollResult.text) {
+            finalResponseText = pollResult.text;
+            break;
+          }
+        }
+      }
+
+      if (!finalResponseText) {
+        return {
+          response: new Response(JSON.stringify({ error: "No response from Gemini" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          }),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      return this.buildFormattedResponse({
+        responseText: finalResponseText,
+        modelId,
+        hasTools,
+        requestedTools,
+        stream: Boolean(stream),
+        body,
+      });
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : "Unknown error";
+      const errorCode = (error as { code?: string } | null)?.code;
+      const errorStatus = (error as { status?: number } | null)?.status;
+
+      if (errorCode === GEMINI_DEEP_THINK_TIMEOUT_CODE || errorStatus === 504) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(504, rawMessage, null, {
+                type: "timeout_error",
+                code: GEMINI_DEEP_THINK_TIMEOUT_CODE,
+              })
+            ),
+            { status: 504, headers: { "Content-Type": "application/json" } }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      if (
+        errorCode === "gemini_deep_think_generation_failed" ||
+        rawMessage.includes("gemini_deep_think_generation_failed")
+      ) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(502, rawMessage, null, {
+                type: "server_error",
+                code: "gemini_deep_think_generation_failed",
+              })
+            ),
+            { status: 502, headers: { "Content-Type": "application/json" } }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      if (
+        errorCode === "gemini_web_auth_required" ||
+        rawMessage.includes("gemini_web_auth_required")
+      ) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(401, rawMessage, null, {
+                type: "authentication_error",
+                code: "gemini_web_auth_required",
+              })
+            ),
+            { status: 401, headers: { "Content-Type": "application/json" } }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
+      return {
+        response: new Response(
+          JSON.stringify({
+            error: sanitizeErrorMessage(rawMessage),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ),
+        url: GEMINI_URL,
+        headers: {},
+        transformedBody: body,
+      };
+    }
+  }
+
   async execute(input: ExecuteInput) {
     const { model, body, stream, credentials, signal, log, onCredentialsRefreshed } = input;
     const requestBody = body as GeminiRequestBody;
@@ -503,7 +1025,27 @@ export class GeminiWebExecutor extends BaseExecutor {
       };
     }
 
-    let browser: any = null;
+    const modelId = model || "gemini-2.5-pro";
+
+    const useBrowserAutomation =
+      (
+        credentials?.providerSpecificData as
+          { browserAutomation?: boolean; engine?: string } | undefined
+      )?.browserAutomation === true ||
+      (credentials?.providerSpecificData as { engine?: string } | undefined)?.engine === "browser";
+
+    if (modelId === "gemini-deep-think" && !useBrowserAutomation) {
+      return this.executeDirectDeepThink({
+        input,
+        cookie,
+        prompt,
+        modelId,
+        hasTools,
+        requestedTools,
+      });
+    }
+
+    let browser: import("playwright").Browser | null = null;
     let abortBrowser: (() => void) | null = null;
     try {
       if (signal?.aborted) {
@@ -532,8 +1074,6 @@ export class GeminiWebExecutor extends BaseExecutor {
 
       const page = await context.newPage();
 
-      const modelId = model || "gemini-2.5-pro";
-
       // Capture first StreamGenerate response
       let responseText = "";
       if (modelId === "gemini-deep-think") {
@@ -547,6 +1087,8 @@ export class GeminiWebExecutor extends BaseExecutor {
           (credentials?.providerSpecificData as { timeoutMs?: number } | undefined)?.timeoutMs
         );
 
+        const { runGeminiDeepThinkUiStateMachine } =
+          await import("./gemini-web/browserAutomation.ts");
         const rawResult = await runGeminiDeepThinkUiStateMachine({
           page,
           prompt,
@@ -557,7 +1099,7 @@ export class GeminiWebExecutor extends BaseExecutor {
       } else {
         let captured = false;
         const responsePromise = new Promise<void>((resolve) => {
-          page.on("response", async (resp: any) => {
+          page.on("response", async (resp: { url: () => string; text: () => Promise<string> }) => {
             if (!resp.url().includes("StreamGenerate")) return;
             if (captured) return;
             // Resolve even if reading the body throws, so the flow falls through
@@ -609,84 +1151,38 @@ export class GeminiWebExecutor extends BaseExecutor {
 
       await this.persistRotatedCookies(context, cookie, credentials, onCredentialsRefreshed, log);
 
-      if (hasTools) {
-        const cid = `chatcmpl-gwe-${crypto.randomUUID().slice(0, 12)}`;
-        const created = Math.floor(Date.now() / 1000);
-        const toolResponse = await buildGeminiToolResponse(
-          responseText,
-          requestedTools,
-          Boolean(stream),
-          modelId,
-          cid,
-          created
-        );
-        return { response: toolResponse, url: GEMINI_URL, headers: {}, transformedBody: body };
-      }
-
-      if (stream) {
-        // Pseudo-streaming: send complete response as single SSE chunk
-        // Gemini's StreamGenerate returns complete responses, not chunked streams
-        const encoder = new TextEncoder();
-        const readable = new ReadableStream(
-          {
-            start(controller) {
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify(formatStreamChunk(responseText, modelId))}\n\n`
-                )
-              );
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify(formatStreamChunk("", modelId, "stop"))}\n\n`
-                )
-              );
-              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-              controller.close();
-            },
-          },
-          { highWaterMark: 16384 }
-        );
-        return {
-          response: new Response(readable, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/event-stream",
-              "Cache-Control": "no-cache",
-              Connection: "keep-alive",
-            },
-          }),
-          url: GEMINI_URL,
-          headers: {},
-          transformedBody: body,
-        };
-      }
-
-      return {
-        response: new Response(JSON.stringify(formatChatCompletion(responseText, modelId)), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-        url: GEMINI_URL,
-        headers: {},
-        transformedBody: body,
-      };
+      return this.buildFormattedResponse({
+        responseText,
+        modelId,
+        hasTools,
+        requestedTools,
+        stream: Boolean(stream),
+        body,
+      });
     } catch (error) {
-      if (error instanceof GeminiWebUiStateError) {
+      if (
+        (error as { name?: string })?.name === "GeminiWebUiStateError" ||
+        (error as { code?: string })?.code === "gemini_deep_think_unavailable" ||
+        (error as { code?: string })?.code === "gemini_web_ui_contract_mismatch"
+      ) {
+        const uiError = error as { status?: number; message?: string; code?: string };
+        const status = uiError.status || 409;
+        const msg = uiError.message || "Gemini Web UI state error";
         return {
           response: new Response(
             JSON.stringify(
-              buildErrorBody(error.status, error.message, null, {
+              buildErrorBody(status, msg, null, {
                 type:
-                  error.status === 401
+                  status === 401
                     ? "authentication_error"
-                    : error.status >= 500
+                    : status >= 500
                       ? "server_error"
                       : "invalid_request_error",
-                code: error.code,
+                code: uiError.code,
               })
             ),
             {
-              status: error.status,
+              status,
               headers: { "Content-Type": "application/json" },
             }
           ),

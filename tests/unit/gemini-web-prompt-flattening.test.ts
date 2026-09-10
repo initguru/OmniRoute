@@ -265,7 +265,7 @@ test("GeminiWebExecutor.execute runs state machine and fills prompt for gemini-d
       stream: false,
       credentials: {
         apiKey: "__Secure-1PSID=test-sid",
-        providerSpecificData: { timeoutMs: 120_000 },
+        providerSpecificData: { timeoutMs: 120_000, browserAutomation: true },
       },
       signal: AbortSignal.timeout(10000),
       log: null,
@@ -303,7 +303,10 @@ test("GeminiWebExecutor.execute maps GeminiWebUiStateError appropriately without
       model: "gemini-deep-think",
       body: { messages: [{ role: "user", content: "hello" }], stream: false },
       stream: false,
-      credentials: { apiKey: "__Secure-1PSID=test-sid" },
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: { browserAutomation: true },
+      },
       signal: AbortSignal.timeout(5000),
       log: null,
     });
@@ -333,7 +336,10 @@ test("GeminiWebExecutor.execute maps GeminiWebUiStateError appropriately without
       model: "gemini-deep-think",
       body: { messages: [{ role: "user", content: "hello" }], stream: false },
       stream: false,
-      credentials: { apiKey: "__Secure-1PSID=test-sid" },
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: { browserAutomation: true },
+      },
       signal: AbortSignal.timeout(5000),
       log: null,
     });
@@ -365,7 +371,7 @@ test("GeminiWebExecutor.execute maps GeminiWebUiStateError appropriately without
       stream: false,
       credentials: {
         apiKey: "__Secure-1PSID=test-sid",
-        providerSpecificData: { timeoutMs: 20 },
+        providerSpecificData: { timeoutMs: 20, browserAutomation: true },
       },
       signal: AbortSignal.timeout(5000),
       log: null,
@@ -415,7 +421,10 @@ test("Legacy models continue through the existing typing path without regression
       model: "gemini-3.1-pro",
       body: { messages: [{ role: "user", content: "legacy question" }], stream: false },
       stream: false,
-      credentials: { apiKey: "__Secure-1PSID=test-sid" },
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: { browserAutomation: true },
+      },
       signal: AbortSignal.timeout(5000),
       log: null,
     });

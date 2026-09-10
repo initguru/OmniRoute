@@ -1,8 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import type { ExecuteInput } from "../../open-sse/executors/base.ts";
 
-const { GeminiWebExecutor, parseStreamResponse } =
+const fixturePath = fileURLToPath(
+  new URL("../fixtures/gemini-web/deep-think-observed-wire.json", import.meta.url)
+);
+const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+
+interface DirectCompletionShape {
+  model: string;
+  choices: Array<{
+    message: {
+      content: string;
+    };
+  }>;
+}
+
+interface DirectErrorShape {
+  error: {
+    code: string;
+    type: string;
+  };
+}
+
+const { GeminiWebExecutor, parseStreamResponse, clearGeminiWebSessionCache } =
   await import("../../open-sse/executors/gemini-web.ts");
+const { GEMINI_DEEP_THINK_TIMEOUT_CODE } = await import("../../open-sse/config/constants.ts");
 const { getExecutor, hasSpecializedExecutor } = await import("../../open-sse/executors/index.ts");
 
 // ─── Registration ───────────────────────────────────────────────────────────
@@ -31,7 +56,7 @@ test("Returns 401 when no cookies provided", async () => {
     log: null,
   });
   assert.equal(result.response.status, 401);
-  const json = (await result.response.json()) as any;
+  const json = (await result.response.json()) as { error: string };
   assert.ok(json.error.includes("Missing Gemini cookies"));
 });
 
@@ -46,7 +71,7 @@ test("Returns 400 when no user message", async () => {
     log: null,
   });
   assert.equal(result.response.status, 400);
-  const json = (await result.response.json()) as any;
+  const json = (await result.response.json()) as { error: string };
   assert.ok(json.error.includes("No user message"));
 });
 
@@ -70,7 +95,7 @@ test("Reads bulk-imported cookie credentials from providerSpecificData.cookie", 
       stream: false,
       credentials: {
         providerSpecificData: { cookie: "__Secure-1PSID=from-bulk-import" },
-      } as any,
+      } as unknown as ExecuteInput["credentials"],
       signal: AbortSignal.timeout(5000),
       log: null,
     });
@@ -92,8 +117,8 @@ test("Ignores array-valued providerSpecificData when resolving cookies", async (
     body: { messages: [{ role: "user", content: "hello" }], stream: false },
     stream: false,
     credentials: {
-      providerSpecificData: ["__Secure-1PSID=not-a-record"],
-    } as any,
+      providerSpecificData: ["__Secure-1PSID=not-a-record"] as unknown as Record<string, unknown>,
+    } as unknown as ExecuteInput["credentials"],
     signal: AbortSignal.timeout(5000),
     log: null,
   });
@@ -126,7 +151,7 @@ test("Normalizes a bare __Secure-1PSID value before adding browser cookies", asy
         }),
       }),
       close: async () => {},
-    }) as any;
+    }) as unknown as typeof playwright.chromium.launch;
 
   try {
     const executor = new GeminiWebExecutor();
@@ -168,7 +193,7 @@ test("Provider: gemini-web has correct models", async () => {
   const { REGISTRY } = await import("../../open-sse/config/providerRegistry.ts");
   const models = REGISTRY["gemini-web"].models;
   assert.deepEqual(
-    models.map((m: any) => [m.id, m.name]),
+    models.map((m: { id: string; name: string }) => [m.id, m.name]),
     [
       ["gemini-deep-think", "Gemini Deep Think"],
       ["gemini-3.1-pro", "Gemini 3.1 Pro"],
@@ -224,7 +249,7 @@ test("#2832/#3516: missing Playwright browser returns an actionable 503 with coo
       "connection_cooldown",
       "must signal connection cooldown so the provider breaker is skipped"
     );
-    const json = (await result.response.json()) as any;
+    const json = (await result.response.json()) as { error: string };
     assert.ok(typeof json.error === "string", "error field must be a string");
     assert.match(json.error, /playwright install|not installed/i, "message must be actionable");
     // No raw stack trace / source path leaks into the body.
@@ -260,7 +285,7 @@ test("#2832: GeminiWebExecutor catch block sanitizes Playwright launch errors (i
   // Aborted request should return a structured 500, not throw
   assert.ok(result.response instanceof Response, "must return a Response object");
   assert.equal(result.response.status, 500, "aborted request returns 500");
-  const json = (await result.response.json()) as any;
+  const json = (await result.response.json()) as { error: string };
   assert.ok(typeof json.error === "string", "error must be a string");
   assert.ok(!json.error.includes("at /"), "no stack trace path in error response");
 });
@@ -359,7 +384,7 @@ test("GeminiWebExecutor handles GeminiWebUiStateError with gemini_deep_think_gen
       model: "gemini-deep-think",
       body: { messages: [{ role: "user", content: "hard problem" }], stream: false },
       stream: false,
-      credentials: { apiKey: "cookie=123" },
+      credentials: { apiKey: "cookie=123", providerSpecificData: { browserAutomation: true } },
       signal: AbortSignal.timeout(5000),
       log: null,
     });
@@ -402,4 +427,143 @@ test("parseStreamResponse keeps only the final cumulative StreamGenerate snapsho
 test("parseStreamResponse ignores wrb.fr lines whose first entry is not an array", () => {
   const raw = `)]}'\n10\n${JSON.stringify(["wrb.fr", null, "[]"])}`;
   assert.equal(parseStreamResponse(raw), "");
+});
+
+// ─── Direct API (gemini-deep-think) ──────────────────────────────────────────
+
+test("GeminiWebExecutor executes gemini-deep-think via Direct API end-to-end", async () => {
+  clearGeminiWebSessionCache();
+  const mockHtml = `<html><head><script>window.WIZ_global_data={"SNlM0e":"at123","FdrFJe":"fsid123","cfb2h":"bl123"};</script></head></html>`;
+
+  const mockFetch = (async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/app")) {
+      return new Response(mockHtml, { status: 200, headers: { "Content-Type": "text/html" } });
+    }
+    if (url.includes("StreamGenerate")) {
+      return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+    }
+    if (url.includes("batchexecute")) {
+      return new Response(fixture.pollCompletedResponse, { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  }) as typeof fetch;
+
+  const executor = new GeminiWebExecutor();
+  const result = await executor.execute({
+    model: "gemini-deep-think",
+    body: { messages: [{ role: "user", content: "Reason through this" }], stream: false },
+    stream: false,
+    credentials: {
+      apiKey: "__Secure-1PSID=cookie-test",
+      providerSpecificData: { pollIntervalMs: 5 },
+    },
+    signal: AbortSignal.timeout(5000),
+    log: null,
+    fetch: mockFetch,
+  } as unknown as ExecuteInput);
+
+  assert.equal(result.response.status, 200);
+  const json = (await result.response.json()) as DirectCompletionShape;
+  assert.equal(json.choices[0].message.content, "Paris");
+  assert.equal(json.model, "gemini-deep-think");
+});
+
+test("GeminiWebExecutor handles Direct API session bootstrap failure as HTTP 401 gemini_web_auth_required", async () => {
+  clearGeminiWebSessionCache();
+  const mockFetch = (async () => {
+    return new Response("<html><body>Login required</body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+  }) as typeof fetch;
+
+  const executor = new GeminiWebExecutor();
+  const result = await executor.execute({
+    model: "gemini-deep-think",
+    body: { messages: [{ role: "user", content: "Hello" }], stream: false },
+    stream: false,
+    credentials: { apiKey: "__Secure-1PSID=bad-cookie" },
+    signal: AbortSignal.timeout(5000),
+    log: null,
+    fetch: mockFetch,
+  } as unknown as ExecuteInput);
+
+  assert.equal(result.response.status, 401);
+  const json = (await result.response.json()) as DirectErrorShape;
+  assert.equal(json.error.code, "gemini_web_auth_required");
+  assert.equal(json.error.type, "authentication_error");
+});
+
+test("GeminiWebExecutor handles Direct API polling failure as HTTP 502 gemini_deep_think_generation_failed", async () => {
+  clearGeminiWebSessionCache();
+  const mockHtml = `<html><head><script>window.WIZ_global_data={"SNlM0e":"at123","FdrFJe":"fsid123","cfb2h":"bl123"};</script></head></html>`;
+
+  const mockFetch = (async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/app"))
+      return new Response(mockHtml, { status: 200, headers: { "Content-Type": "text/html" } });
+    if (url.includes("StreamGenerate"))
+      return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+    if (url.includes("batchexecute"))
+      return new Response(fixture.pollFailedResponse, { status: 200 });
+    return new Response("Not found", { status: 404 });
+  }) as typeof fetch;
+
+  const executor = new GeminiWebExecutor();
+  const result = await executor.execute({
+    model: "gemini-deep-think",
+    body: { messages: [{ role: "user", content: "hard problem" }], stream: false },
+    stream: false,
+    credentials: {
+      apiKey: "__Secure-1PSID=cookie-test",
+      providerSpecificData: { pollIntervalMs: 5 },
+    },
+    signal: AbortSignal.timeout(5000),
+    log: null,
+    fetch: mockFetch,
+  } as unknown as ExecuteInput);
+
+  assert.equal(result.response.status, 502);
+  const json = (await result.response.json()) as DirectErrorShape;
+  assert.equal(json.error.code, "gemini_deep_think_generation_failed");
+  assert.equal(json.error.type, "server_error");
+});
+
+test("GeminiWebExecutor handles Direct API polling timeout as HTTP 504 gemini_deep_think_timeout", async () => {
+  clearGeminiWebSessionCache();
+  const mockHtml = `<html><head><script>window.WIZ_global_data={"SNlM0e":"at123","FdrFJe":"fsid123","cfb2h":"bl123"};</script></head></html>`;
+
+  const mockFetch = (async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/app"))
+      return new Response(mockHtml, { status: 200, headers: { "Content-Type": "text/html" } });
+    if (url.includes("StreamGenerate"))
+      return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+    if (url.includes("batchexecute"))
+      return new Response(fixture.pollPendingResponse, { status: 200 });
+    return new Response("Not found", { status: 404 });
+  }) as typeof fetch;
+
+  const executor = new GeminiWebExecutor();
+  const result = await executor.execute({
+    model: "gemini-deep-think",
+    body: { messages: [{ role: "user", content: "hard problem" }], stream: false },
+    stream: false,
+    credentials: {
+      apiKey: "__Secure-1PSID=cookie-test",
+      providerSpecificData: { timeoutMs: 20, pollIntervalMs: 10 },
+    },
+    signal: AbortSignal.timeout(5000),
+    log: null,
+    fetch: mockFetch,
+  } as unknown as ExecuteInput);
+
+  assert.equal(result.response.status, 504);
+  const json = (await result.response.json()) as DirectErrorShape;
+  assert.equal(json.error.code, GEMINI_DEEP_THINK_TIMEOUT_CODE);
+  assert.equal(json.error.type, "timeout_error");
 });
