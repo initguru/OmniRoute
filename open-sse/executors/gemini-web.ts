@@ -22,6 +22,12 @@ import {
   checkGeminiWebUnsupportedControls,
   GEMINI_WEB_UNSUPPORTED_CONTROL_CODE,
 } from "./gemini-web/capabilities.ts";
+import {
+  runGeminiDeepThinkUiStateMachine,
+  GeminiWebUiStateError,
+} from "./gemini-web/browserAutomation.ts";
+import { resolveDeepThinkTimeoutMs } from "../handlers/chatCore/upstreamTimeouts.ts";
+import { GEMINI_DEEP_THINK_TIMEOUT_CODE } from "../config/constants.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -82,6 +88,25 @@ function formatStreamChunk(content: string, model: string, finishReason: string 
   };
 }
 
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const textParts: string[] = [];
+    for (const part of content) {
+      if (
+        part &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        textParts.push((part as { text: string }).text);
+      }
+    }
+    return textParts.join("");
+  }
+  return "";
+}
+
 /**
  * Flatten the OpenAI-style multi-turn `messages[]` into the single plain-text
  * prompt typed into the Gemini web UI (#8371).
@@ -111,9 +136,12 @@ function formatStreamChunk(content: string, model: string, finishReason: string 
  *   <last user message>
  */
 export function buildGeminiPrompt(messages: Array<{ role: string; content: unknown }>): string {
-  const textMessages = messages.filter(
-    (m) => typeof m.content === "string" && (m.content as string).trim().length > 0
-  ) as Array<{ role: string; content: string }>;
+  const textMessages = messages
+    .map((m) => ({
+      role: m.role,
+      content: extractMessageText(m.content),
+    }))
+    .filter((m) => m.content.trim().length > 0);
 
   const userMessages = textMessages.filter((m) => m.role === "user");
   const lastUser = userMessages[userMessages.length - 1];
@@ -158,8 +186,8 @@ export function buildGeminiToolPrompt(
 ): string {
   const toolSystemMsg = effectiveMessages.find((m) => m.role === "system");
   const lastUserMsg = [...effectiveMessages].reverse().find((m) => m.role === "user");
-  const userText = typeof lastUserMsg?.content === "string" ? lastUserMsg.content : "";
-  const toolPrompt = typeof toolSystemMsg?.content === "string" ? toolSystemMsg.content : "";
+  const userText = lastUserMsg ? extractMessageText(lastUserMsg.content) : "";
+  const toolPrompt = toolSystemMsg ? extractMessageText(toolSystemMsg.content) : "";
   return toolPrompt ? `${toolPrompt}\n\n${userText}` : userText;
 }
 
@@ -412,7 +440,7 @@ export class GeminiWebExecutor extends BaseExecutor {
     // before Playwright launches — the request is unservable no matter which
     // cookie is used, and answering 200 with ordinary prose made agents believe
     // their reasoning/tool requirements had been met. See ./gemini-web/capabilities.ts.
-    const violation = checkGeminiWebUnsupportedControls(body as Record<string, unknown>);
+    const violation = checkGeminiWebUnsupportedControls(body as Record<string, unknown>, model);
     if (violation) {
       log?.warn?.(
         "GEMINI-WEB",
@@ -503,45 +531,67 @@ export class GeminiWebExecutor extends BaseExecutor {
 
       const page = await context.newPage();
 
+      const modelId = model || "gemini-2.5-pro";
+
       // Capture first StreamGenerate response
       let responseText = "";
-      let captured = false;
-      const responsePromise = new Promise<void>((resolve) => {
-        page.on("response", async (resp: any) => {
-          if (!resp.url().includes("StreamGenerate")) return;
-          if (captured) return;
-          // Resolve even if reading the body throws, so the flow falls through
-          // to the "No response from Gemini" 502 instead of burning the full
-          // wait window.
-          captured = true;
-          try {
-            const raw = await resp.text();
-            responseText = parseStreamResponse(raw);
-          } catch {
-            /* ignore */
-          }
-          resolve();
+      if (modelId === "gemini-deep-think") {
+        await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+        }
+        await page.waitForTimeout(3000);
+
+        const timeoutMs = resolveDeepThinkTimeoutMs(
+          (credentials?.providerSpecificData as { timeoutMs?: number } | undefined)?.timeoutMs
+        );
+
+        const rawResult = await runGeminiDeepThinkUiStateMachine({
+          page,
+          prompt,
+          signal: signal ?? undefined,
+          timeoutMs,
         });
-      });
+        responseText = parseStreamResponse(rawResult);
+      } else {
+        let captured = false;
+        const responsePromise = new Promise<void>((resolve) => {
+          page.on("response", async (resp: any) => {
+            if (!resp.url().includes("StreamGenerate")) return;
+            if (captured) return;
+            // Resolve even if reading the body throws, so the flow falls through
+            // to the "No response from Gemini" 502 instead of burning the full
+            // wait window.
+            captured = true;
+            try {
+              const raw = await resp.text();
+              responseText = parseStreamResponse(raw);
+            } catch {
+              /* ignore */
+            }
+            resolve();
+          });
+        });
 
-      await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
-      if (signal?.aborted) {
-        throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
-      }
-      await page.waitForTimeout(3000);
+        await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+        }
+        await page.waitForTimeout(3000);
 
-      // Type and send message
-      const inputEl = await page.waitForSelector(".ql-editor, [contenteditable='true']", {
-        timeout: 10000,
-      });
-      await inputEl.click();
-      await page.keyboard.type(prompt, { delay: 10 });
-      await page.waitForTimeout(300);
-      await page.keyboard.press("Enter");
+        // Type and send message
+        const inputEl = await page.waitForSelector(".ql-editor, [contenteditable='true']", {
+          timeout: 10000,
+        });
+        await inputEl.click();
+        await page.keyboard.type(prompt, { delay: 10 });
+        await page.waitForTimeout(300);
+        await page.keyboard.press("Enter");
 
-      await Promise.race([responsePromise, page.waitForTimeout(30000)]);
-      if (signal?.aborted) {
-        throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+        await Promise.race([responsePromise, page.waitForTimeout(30000)]);
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+        }
       }
 
       if (!responseText) {
@@ -557,8 +607,6 @@ export class GeminiWebExecutor extends BaseExecutor {
       }
 
       await this.persistRotatedCookies(context, cookie, credentials, onCredentialsRefreshed, log);
-
-      const modelId = model || "gemini-2.5-pro";
 
       if (hasTools) {
         const cid = `chatcmpl-gwe-${crypto.randomUUID().slice(0, 12)}`;
@@ -622,7 +670,49 @@ export class GeminiWebExecutor extends BaseExecutor {
         transformedBody: body,
       };
     } catch (error) {
+      if (error instanceof GeminiWebUiStateError) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(error.status, error.message, null, {
+                type: error.status === 401 ? "authentication_error" : "invalid_request_error",
+                code: error.code,
+              })
+            ),
+            {
+              status: error.status,
+              headers: { "Content-Type": "application/json" },
+            }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
+
       const rawMessage = error instanceof Error ? error.message : "Unknown error";
+      const errorCode = (error as { code?: string } | null)?.code;
+      const errorStatus = (error as { status?: number } | null)?.status;
+
+      if (errorCode === GEMINI_DEEP_THINK_TIMEOUT_CODE || errorStatus === 504) {
+        return {
+          response: new Response(
+            JSON.stringify(
+              buildErrorBody(504, rawMessage, null, {
+                type: "timeout_error",
+                code: GEMINI_DEEP_THINK_TIMEOUT_CODE,
+              })
+            ),
+            {
+              status: 504,
+              headers: { "Content-Type": "application/json" },
+            }
+          ),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
+      }
       // #3516: a missing Playwright browser is a host/config problem, not a transient upstream
       // fault. Surface an actionable error and tag it with the connection-cooldown hint so
       // accountFallback skips the provider circuit breaker and applies a short, non-exponential
