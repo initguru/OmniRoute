@@ -53,6 +53,43 @@ export const DEEP_THINK_TOGGLE_SELECTOR =
   "[role='menuitem']:has-text('Deep Think'), button:has-text('Deep Think')";
 
 /**
+ * Validates if the mode picker aria-label or button text indicates Pro mode.
+ * Matches "3.1 Pro", "currently Pro", "currently Pro Deep Think", or standalone "pro".
+ */
+export function isProModeLabel(label: string, buttonText: string = ""): boolean {
+  const lowerLabel = label.toLowerCase();
+  const lowerText = buttonText.toLowerCase();
+  return (
+    lowerLabel.includes("3.1 pro") ||
+    lowerLabel.includes("currently pro") ||
+    /\bpro\b/i.test(lowerLabel) ||
+    lowerText.includes("3.1 pro") ||
+    /\bpro\b/i.test(lowerText)
+  );
+}
+
+/**
+ * Validates if the mode picker aria-label or button text indicates Deep Think is already active.
+ */
+export function isDeepThinkActiveLabel(ariaLabel: string, buttonText: string = ""): boolean {
+  const lowerLabel = ariaLabel.toLowerCase();
+  const lowerText = buttonText.toLowerCase();
+  return lowerLabel.includes("deep think") || lowerText.includes("deep think");
+}
+
+/**
+ * Checks if a StreamGenerate response body is an intermediate Deep Think placeholder / acknowledgement
+ * (e.g., "Responses with Deep Think can take some time" or agentic processing chip reference).
+ */
+export function isDeepThinkPlaceholder(bodyStr: string): boolean {
+  return (
+    bodyStr.includes("agentic_processing_chip") ||
+    bodyStr.includes("Responses with Deep Think can take some time") ||
+    bodyStr.includes("Generating your response… Check back later")
+  );
+}
+
+/**
  * Runs the verified headless UI state machine for Gemini Web Deep Think.
  *
  * State Order:
@@ -120,6 +157,12 @@ export async function runGeminiDeepThinkUiStateMachine(
         return;
       }
 
+      // If the response is an intermediate Deep Think processing placeholder,
+      // do not resolve yet; continue awaiting subsequent StreamGenerate response.
+      if (isDeepThinkPlaceholder(bodyStr)) {
+        return;
+      }
+
       rawResponseBody = bodyStr;
       resolveResponse?.();
     } catch (err) {
@@ -182,7 +225,11 @@ export async function runGeminiDeepThinkUiStateMachine(
     }
 
     const currentAriaLabel = (await modePicker.getAttribute("aria-label")) ?? "";
-    const isProSelected = currentAriaLabel.toLowerCase().includes("3.1 pro");
+    const currentButtonText =
+      (typeof modePicker.innerText === "function" ? await modePicker.innerText() : null) ||
+      (typeof modePicker.textContent === "function" ? await modePicker.textContent() : null) ||
+      "";
+    const isProSelected = isProModeLabel(currentAriaLabel, currentButtonText);
 
     if (!isProSelected) {
       await modePicker.click();
@@ -215,63 +262,84 @@ export async function runGeminiDeepThinkUiStateMachine(
 
       await proItem.click();
 
-      // Assert postcondition: mode picker button aria-label includes "3.1 Pro"
+      // Assert postcondition: mode picker button aria-label includes "Pro" or "3.1 Pro"
       const updatedAriaLabel = (await modePicker.getAttribute("aria-label")) ?? "";
-      if (!updatedAriaLabel.toLowerCase().includes("3.1 pro")) {
+      const updatedButtonText =
+        (typeof modePicker.innerText === "function" ? await modePicker.innerText() : null) ||
+        (typeof modePicker.textContent === "function" ? await modePicker.textContent() : null) ||
+        "";
+      if (!isProModeLabel(updatedAriaLabel, updatedButtonText)) {
         throw new GeminiWebUiStateError(
           "gemini_web_ui_contract_mismatch",
-          `Failed to verify 3.1 Pro mode selection postcondition. Got aria-label: "${updatedAriaLabel}"`,
+          `Failed to verify Pro mode selection postcondition. Got aria-label: "${updatedAriaLabel}"`,
           409
         );
       }
     }
 
     // 3. Deep Think Option Verification
-    const deepThinkToggle = page.locator(DEEP_THINK_TOGGLE_SELECTOR).first();
-    let dtCount = await deepThinkToggle.count();
-    if (dtCount === 0) {
-      // If Deep Think is inside mode picker menu and menu closed, try opening mode picker
-      await modePicker.click();
-      dtCount = await deepThinkToggle.count();
-    }
+    const pickerAria = (await modePicker.getAttribute("aria-label")) ?? "";
+    const pickerText =
+      (typeof modePicker.innerText === "function" ? await modePicker.innerText() : null) ||
+      (typeof modePicker.textContent === "function" ? await modePicker.textContent() : null) ||
+      "";
+    const alreadyDeepThink = isDeepThinkActiveLabel(pickerAria, pickerText);
 
-    if (dtCount === 0) {
-      throw new GeminiWebUiStateError(
-        "gemini_deep_think_unavailable",
-        "Deep Think option not found in mode picker or prompt area",
-        409
-      );
-    }
+    if (!alreadyDeepThink) {
+      const deepThinkToggle = page.locator(DEEP_THINK_TOGGLE_SELECTOR).first();
+      let dtCount = await deepThinkToggle.count();
+      if (dtCount === 0) {
+        // If Deep Think is inside mode picker menu and menu closed, try opening mode picker
+        await modePicker.click();
+        await page.waitForTimeout(500);
+        dtCount = await deepThinkToggle.count();
+      }
 
-    const dtAriaDisabled = await deepThinkToggle.getAttribute("aria-disabled");
-    if (dtAriaDisabled === "true") {
-      throw new GeminiWebUiStateError(
-        "gemini_deep_think_unavailable",
-        "Deep Think option is disabled",
-        409
-      );
-    }
+      if (dtCount === 0) {
+        throw new GeminiWebUiStateError(
+          "gemini_deep_think_unavailable",
+          "Deep Think option not found in mode picker or prompt area",
+          409
+        );
+      }
 
-    const isDtActive =
-      (await deepThinkToggle.getAttribute("data-active")) === "true" ||
-      (await deepThinkToggle.getAttribute("aria-checked")) === "true";
+      const dtAriaDisabled = await deepThinkToggle.getAttribute("aria-disabled");
+      if (dtAriaDisabled === "true") {
+        throw new GeminiWebUiStateError(
+          "gemini_deep_think_unavailable",
+          "Deep Think option is disabled",
+          409
+        );
+      }
 
-    if (!isDtActive) {
-      await deepThinkToggle.click();
-
-      // Verify postcondition: Deep Think toggle is now active
-      const postDtActive =
+      const isDtActive =
         (await deepThinkToggle.getAttribute("data-active")) === "true" ||
         (await deepThinkToggle.getAttribute("aria-checked")) === "true";
 
-      if (!postDtActive) {
-        const postDisabled = await deepThinkToggle.getAttribute("aria-disabled");
-        if (postDisabled === "true") {
-          throw new GeminiWebUiStateError(
-            "gemini_deep_think_unavailable",
-            "Deep Think option became disabled upon selection",
-            409
-          );
+      if (!isDtActive) {
+        await deepThinkToggle.click();
+        await page.waitForTimeout(500);
+
+        // Verify postcondition: Deep Think toggle is now active, or mode picker reflects Deep Think
+        const postPickerAria = (await modePicker.getAttribute("aria-label")) ?? "";
+        const postPickerText =
+          (typeof modePicker.innerText === "function" ? await modePicker.innerText() : null) ||
+          (typeof modePicker.textContent === "function" ? await modePicker.textContent() : null) ||
+          "";
+        const postDtActive =
+          (await deepThinkToggle.getAttribute("data-active")) === "true" ||
+          (await deepThinkToggle.getAttribute("aria-checked")) === "true" ||
+          isDeepThinkActiveLabel(postPickerAria, postPickerText);
+
+        if (!postDtActive) {
+          const postDisabled = await deepThinkToggle.getAttribute("aria-disabled");
+          if (postDisabled === "true") {
+            throw new GeminiWebUiStateError(
+              "gemini_deep_think_unavailable",
+              "Deep Think option became disabled upon selection",
+              409
+            );
+          }
         }
       }
     }

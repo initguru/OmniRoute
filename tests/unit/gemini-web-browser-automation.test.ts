@@ -8,40 +8,49 @@ import {
 
 interface MockPageOptions {
   initialModePickerAriaLabel?: string;
+  initialModePickerText?: string;
   proMenuItemExists?: boolean;
   proMenuItemAriaDisabled?: string;
   proClickUpdatesModePicker?: boolean;
+  proClickResultAriaLabel?: string;
   deepThinkExists?: boolean;
   deepThinkAriaDisabled?: string;
   deepThinkInitiallyActive?: boolean;
   deepThinkClickActivates?: boolean;
+  deepThinkClickUpdatesModePicker?: boolean;
   composerExists?: boolean;
   composerAcceptsFill?: boolean;
   streamResponseStatus?: number;
   streamResponseBody?: string;
   streamResponseDelayMs?: number;
+  streamResponses?: Array<{ status?: number; body: string; delayMs?: number }>;
   neverRespond?: boolean;
 }
 
 function createMockPage(options: MockPageOptions = {}) {
   const {
     initialModePickerAriaLabel = "Open mode picker, currently Fast",
+    initialModePickerText = "Fast",
     proMenuItemExists = true,
     proMenuItemAriaDisabled = "false",
     proClickUpdatesModePicker = true,
+    proClickResultAriaLabel,
     deepThinkExists = true,
     deepThinkAriaDisabled = "false",
     deepThinkInitiallyActive = false,
     deepThinkClickActivates = true,
+    deepThinkClickUpdatesModePicker = false,
     composerExists = true,
     composerAcceptsFill = true,
     streamResponseStatus = 200,
     streamResponseBody = ')]}\'\n[["wrb.fr",null,"[[null,null,null,null,[null,null,null,null,[\\"Deep Think Result\\"]]]]"]]',
     streamResponseDelayMs = 5,
+    streamResponses,
     neverRespond = false,
   } = options;
 
   let currentModePickerAriaLabel = initialModePickerAriaLabel;
+  let currentModePickerText = initialModePickerText;
   let isDeepThinkActive = deepThinkInitiallyActive;
   let composerText = "";
   let promptInjected = false;
@@ -57,6 +66,23 @@ function createMockPage(options: MockPageOptions = {}) {
 
   const triggerStreamResponse = async () => {
     if (neverRespond) return;
+    if (streamResponses && streamResponses.length > 0) {
+      for (const item of streamResponses) {
+        if (item.delayMs && item.delayMs > 0) {
+          await new Promise((r) => setTimeout(r, item.delayMs));
+        }
+        const mockResp = {
+          url: () =>
+            "https://gemini.google.com/app/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+          status: () => item.status ?? 200,
+          text: async () => item.body,
+        };
+        for (const listener of Array.from(responseListeners)) {
+          await listener(mockResp);
+        }
+      }
+      return;
+    }
     if (streamResponseDelayMs > 0) {
       await new Promise((r) => setTimeout(r, streamResponseDelayMs));
     }
@@ -98,12 +124,18 @@ function createMockPage(options: MockPageOptions = {}) {
             if (attr === "aria-label") return currentModePickerAriaLabel;
             return null;
           },
+          innerText: async () => currentModePickerText,
+          textContent: async () => currentModePickerText,
           click: async () => {},
         };
       }
 
       // Pro menu item
-      if (selector.includes("bard-mode-option-9d8ca3786ebdfbea") || selector.includes("3.1 Pro")) {
+      if (
+        selector.includes("bard-mode-option-9d8ca3786ebdfbea") ||
+        selector.includes("3.1 Pro") ||
+        selector.includes("Pro")
+      ) {
         return {
           first: () => this.locator(selector),
           count: async () => (proMenuItemExists ? 1 : 0),
@@ -113,7 +145,8 @@ function createMockPage(options: MockPageOptions = {}) {
           },
           click: async () => {
             if (proClickUpdatesModePicker) {
-              currentModePickerAriaLabel = "Open mode picker, currently 3.1 Pro";
+              currentModePickerAriaLabel =
+                proClickResultAriaLabel ?? "Open mode picker, currently 3.1 Pro";
             }
           },
         };
@@ -133,6 +166,10 @@ function createMockPage(options: MockPageOptions = {}) {
           click: async () => {
             if (deepThinkClickActivates) {
               isDeepThinkActive = true;
+              if (deepThinkClickUpdatesModePicker) {
+                currentModePickerAriaLabel = "Open mode picker, currently Pro Deep Think";
+                currentModePickerText = "Pro\nDeep Think";
+              }
             }
           },
         };
@@ -551,5 +588,126 @@ test("When signal is already aborted before start, fails immediately and cleans 
 
   assert.equal(mockPage.state.promptInjected, false);
   assert.equal(mockPage.state.promptSubmitted, false);
+  assert.equal(mockPage.state.responseListenersCount, 0);
+});
+
+test("Google AI Ultra mode picker: recognizes 'Open mode picker, currently Pro' as Pro selected", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro",
+    initialModePickerText: "Pro",
+    deepThinkExists: true,
+    deepThinkInitiallyActive: true,
+  });
+
+  const prompt = "Prompt on Ultra with currently Pro";
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt,
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  assert.match(rawResponse, /Deep Think Result/);
+  assert.equal(mockPage.state.promptInjected, true);
+  assert.equal(mockPage.state.promptSubmitted, true);
+});
+
+test("Google AI Ultra mode picker: recognizes 'Open mode picker, currently Pro Deep Think' as Pro and Deep Think active", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    deepThinkExists: false, // Menu item should not even need to be queried because button already shows Deep Think active!
+  });
+
+  const prompt = "Prompt on Ultra with currently Pro Deep Think";
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt,
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  assert.match(rawResponse, /Deep Think Result/);
+  assert.equal(mockPage.state.promptInjected, true);
+  assert.equal(mockPage.state.promptSubmitted, true);
+});
+
+test("Google AI Ultra postcondition: when clicking Pro updates aria-label to 'Open mode picker, currently Pro', postcondition succeeds", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Fast",
+    initialModePickerText: "Fast",
+    proMenuItemExists: true,
+    proClickUpdatesModePicker: true,
+    proClickResultAriaLabel: "Open mode picker, currently Pro",
+    deepThinkExists: true,
+    deepThinkInitiallyActive: true,
+  });
+
+  const prompt = "Test Ultra Pro postcondition";
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt,
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  assert.match(rawResponse, /Deep Think Result/);
+  assert.equal(mockPage.state.promptInjected, true);
+  assert.equal(mockPage.state.promptSubmitted, true);
+});
+
+test("Deep Think activation: clicking Deep Think updates mode picker label and verifies postcondition", async () => {
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro",
+    initialModePickerText: "Pro",
+    deepThinkExists: true,
+    deepThinkInitiallyActive: false,
+    deepThinkClickActivates: true,
+    deepThinkClickUpdatesModePicker: true,
+  });
+
+  const prompt = "Activating Deep Think dynamically";
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt,
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  assert.match(rawResponse, /Deep Think Result/);
+  assert.equal(mockPage.state.isDeepThinkActive, true);
+  assert.equal(
+    mockPage.state.currentModePickerAriaLabel,
+    "Open mode picker, currently Pro Deep Think"
+  );
+});
+
+test("Deep Think intermediate placeholder: ignores 'Responses with Deep Think can take some time' / agentic_processing_chip frame and resolves with subsequent final StreamGenerate response", async () => {
+  const placeholderBody =
+    ')]}\'\n[["wrb.fr",null,"[[null,null,null,null,[null,null,null,null,[\\"I\'m on it. Responses with Deep Think can take some time, so check back in a bit.\\\\n\\\\n http://googleusercontent.com/agentic_processing_chip/0\\"]]]]"]]';
+  const finalBody =
+    ')]}\'\n[["wrb.fr",null,"[[null,null,null,null,[null,null,null,null,[\\"Verified Final Deep Think Answer\\"]]]]"]]';
+
+  const mockPage = createMockPage({
+    initialModePickerAriaLabel: "Open mode picker, currently Pro Deep Think",
+    initialModePickerText: "Pro\nDeep Think",
+    streamResponses: [
+      { status: 200, body: placeholderBody, delayMs: 5 },
+      { status: 200, body: finalBody, delayMs: 25 },
+    ],
+  });
+
+  const prompt = "Proof that triggers parallel deep thinking";
+  const rawResponse = await runGeminiDeepThinkUiStateMachine({
+    page: mockPage as unknown as Page,
+    prompt,
+    signal: new AbortController().signal,
+    timeoutMs: 5000,
+  });
+
+  assert.match(rawResponse, /Verified Final Deep Think Answer/);
+  assert.doesNotMatch(rawResponse, /agentic_processing_chip/);
+  assert.equal(mockPage.state.promptInjected, true);
+  assert.equal(mockPage.state.promptSubmitted, true);
   assert.equal(mockPage.state.responseListenersCount, 0);
 });
