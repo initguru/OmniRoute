@@ -799,3 +799,96 @@ Do not read unnecessary files.`,
   assert.ok(result.prompt.includes("[사용자 질문]"));
   assert.ok(result.prompt.includes("분산 트랜잭션의 2PC와 SAGA 패턴의 차이점을 설명해줘."));
 });
+
+test("Gemini Deep Think Purifier — preserves English domain instructions in system array mixed with operational harness", () => {
+  const systemArray = [
+    {
+      type: "text",
+      text: "x-anthropic-billing-header: cc-uuid-9f2db3-4451",
+    },
+    {
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+    },
+    {
+      type: "text",
+      text: `You are an interactive agent that helps users with software engineering tasks.
+
+Security guidance: Do not assist with cyberattacks or bypass security controls.
+
+Pronouns: The user may refer to you as Claude.
+
+Reversibility: When modifying code, make changes that are easily reversible.
+
+# Session-specific guidance
+You are currently in a multi-turn conversation.
+Follow the user's instructions carefully.
+
+Do not assume capabilities that are not exposed.
+
+# Memory
+You have a persistent file-based memory at /Users/jihyun.son/.claude/projects/-Users-jihyun-son-github-OmniRoute/memory/
+Review memory files before performing critical actions.
+
+# Environment
+Working directory: /Users/jihyun.son/github/OmniRoute/.claude/worktrees/gemini-web-robust-enhancements
+Is directory a git repo: true
+
+# Context management
+Keep your context window clean.
+Do not read unnecessary files.`,
+    },
+    {
+      type: "text",
+      text: "Please answer in a professional and objective tone.\nFormat output as JSON.",
+    },
+  ];
+
+  const messages = [
+    {
+      role: "user",
+      content: "List the top 3 database optimization strategies.",
+    },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages, systemArray);
+
+  assert.equal(result.hasUserContent, true);
+  assert.ok(result.prompt.includes("[시스템 지침]"));
+  assert.ok(result.prompt.includes("Please answer in a professional and objective tone."));
+  assert.ok(result.prompt.includes("Format output as JSON."));
+  assert.ok(!result.prompt.includes("You are an interactive agent"));
+  assert.ok(!result.prompt.includes("Session-specific guidance"));
+  assert.ok(!result.prompt.includes("Context management"));
+  assert.ok(!result.prompt.includes("persistent file-based memory"));
+  assert.ok(!result.prompt.includes("x-anthropic-billing-header"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("List the top 3 database optimization strategies."));
+});
+
+test("Gemini Deep Think Purifier — preserves English user question following harness in user turn", () => {
+  const userContent = `# Delegation role definitions
+Role terms in this prompt are structural: "root/main session" means the primary conversation.
+Only the root/main session coordinates work. Every subagent is a terminal leaf worker.
+
+# MCP Server Instructions
+The following MCP servers have provided instructions:
+## context7
+Use this server to fetch current documentation.
+
+# Mandatory Parent Edit Barrier
+As the root/main coordinator, you are STRICTLY PROHIBITED from calling Edit or Write.
+
+How do I configure nginx reverse proxy with websockets?`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "How do I configure nginx reverse proxy with websockets?");
+  assert.ok(!result.prompt.includes("Delegation role definitions"));
+  assert.ok(!result.prompt.includes("MCP Server Instructions"));
+  assert.ok(!result.prompt.includes("Mandatory Parent Edit Barrier"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("How do I configure nginx reverse proxy with websockets?"));
+});

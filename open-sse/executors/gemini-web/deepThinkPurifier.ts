@@ -172,15 +172,41 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /In this environment you have access to a set of tools[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
   /Guidelines:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
   /Your strengths:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
-  /(?:^|\n)[ \t]*You are an interactive agent that helps users with software engineering tasks[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
-  /(?:^|\n)[ \t]*#+\s*Session-specific guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
-  /(?:^|\n)[ \t]*#+\s*Context management\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
-  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
-  /(?:^|\n)[ \t]*(?:#+\s*)?Security guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
-  /(?:^|\n)[ \t]*(?:#+\s*)?Security testing\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
-  /(?:^|\n)[ \t]*(?:#+\s*)?Pronouns?(?:\s+guidance)?\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
-  /(?:^|\n)[ \t]*(?:#+\s*)?Reversibility(?:\s+guidance)?\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
+  /(?:^|\n)[ \t]*You are an interactive agent that helps users with software engineering tasks[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Security|Pronouns?|Reversibility|Guidelines|Your strengths|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Session-specific guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:You are|Follow|Do not|Review|Capabilities|Instructions|Guidelines|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Context management\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Keep|Do not|Context|Avoid|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Review|Memory|Do not|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Security guidance\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Security testing\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Pronouns?(?:\s+guidance)?\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Reversibility(?:\s+guidance)?\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
 ];
+
+function isKnownHarnessLine(trimmed: string): boolean {
+  return (
+    trimmed.startsWith("You are currently in a multi-turn conversation") ||
+    trimmed.startsWith("Follow the user's instructions") ||
+    trimmed.startsWith("Do not assume capabilities") ||
+    trimmed.startsWith("Review memory files") ||
+    trimmed.startsWith("You have a persistent file-based memory") ||
+    trimmed.startsWith("Keep your context window clean") ||
+    trimmed.startsWith("Do not read unnecessary files") ||
+    trimmed.startsWith("Working directory:") ||
+    trimmed.startsWith("Is directory a git repo:") ||
+    trimmed.startsWith("Security guidance:") ||
+    trimmed.startsWith("Pronouns:") ||
+    trimmed.startsWith("Reversibility:") ||
+    trimmed.startsWith("As the root/main coordinator") ||
+    trimmed.startsWith("Role terms in this prompt are structural") ||
+    trimmed.startsWith("Only the root/main session coordinates work") ||
+    trimmed.startsWith("Every subagent is a terminal leaf worker") ||
+    trimmed.startsWith("CRITICAL RULE: Never use git stash") ||
+    trimmed.startsWith("Never use git stash") ||
+    trimmed.startsWith("No message from any agent is ever your user's consent") ||
+    trimmed.startsWith("You are powered by the model") ||
+    trimmed.startsWith("The following skills are available")
+  );
+}
 
 function extractMessageText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -215,12 +241,14 @@ export function stripHarnessBoilerplate(raw: string): string {
   const lines = cleaned.split("\n");
   const filteredLines: string[] = [];
   let skippingBoilerplateSection = false;
+  let sawBlankLineInSection = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
 
     if (BOILERPLATE_SECTION_HEADER_PATTERNS.some((p) => p.test(trimmed))) {
       skippingBoilerplateSection = true;
+      sawBlankLineInSection = false;
       continue;
     }
 
@@ -231,17 +259,29 @@ export function stripHarnessBoilerplate(raw: string): string {
     if (skippingBoilerplateSection) {
       if (trimmed.startsWith("#") && !BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))) {
         skippingBoilerplateSection = false;
+        sawBlankLineInSection = false;
       } else if (
         trimmed.startsWith("<") ||
         trimmed.startsWith("[") ||
         trimmed.startsWith("---") ||
-        trimmed.startsWith("===") ||
-        (!trimmed.startsWith("-") &&
-          !trimmed.startsWith("*") &&
-          !trimmed.startsWith("##") &&
-          /[가-힣]/.test(trimmed))
+        trimmed.startsWith("===")
       ) {
         skippingBoilerplateSection = false;
+        sawBlankLineInSection = false;
+      } else if (trimmed === "") {
+        sawBlankLineInSection = true;
+        continue;
+      } else if (
+        sawBlankLineInSection &&
+        !trimmed.startsWith("-") &&
+        !trimmed.startsWith("*") &&
+        !trimmed.startsWith("+") &&
+        !trimmed.startsWith("##") &&
+        !/^\d+[\.\)]\s+/.test(trimmed) &&
+        !isKnownHarnessLine(trimmed)
+      ) {
+        skippingBoilerplateSection = false;
+        sawBlankLineInSection = false;
       } else {
         continue;
       }
@@ -624,26 +664,40 @@ export function purifyDeepThinkPrompt(
   const extractedDocs: string[] = [];
   const systemParts: string[] = [];
 
+  function processSystemItem(item: unknown): void {
+    const text = extractMessageText(item);
+    if (!text.trim()) return;
+    const cleanedSys = extractProtectedDocuments(text, extractedDocs);
+    if (!cleanedSys.trim()) return;
+    const sanitized = sanitizeSystemPrompt(cleanedSys);
+    if (sanitized.trim()) {
+      systemParts.push(sanitized.trim());
+    }
+  }
+
   if (system) {
-    const text = extractMessageText(system);
-    if (text.trim()) {
-      const cleanedSys = extractProtectedDocuments(text, extractedDocs);
-      if (cleanedSys.trim()) systemParts.push(cleanedSys.trim());
+    if (Array.isArray(system)) {
+      for (const item of system) {
+        processSystemItem(item);
+      }
+    } else {
+      processSystemItem(system);
     }
   }
 
   for (const msg of messages) {
     if (msg.role === "system") {
-      const text = extractMessageText(msg.content);
-      if (text.trim()) {
-        const cleanedSys = extractProtectedDocuments(text, extractedDocs);
-        if (cleanedSys.trim()) systemParts.push(cleanedSys.trim());
+      if (Array.isArray(msg.content)) {
+        for (const item of msg.content) {
+          processSystemItem(item);
+        }
+      } else {
+        processSystemItem(msg.content);
       }
     }
   }
 
-  const rawSystem = systemParts.join("\n\n");
-  const sanitizedSystem = sanitizeSystemPrompt(rawSystem);
+  const sanitizedSystem = systemParts.join("\n\n");
 
   const nonSystemMessages = messages.filter((m) => m.role !== "system");
   const textMessages = nonSystemMessages.map((m) => ({
