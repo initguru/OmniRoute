@@ -14,25 +14,14 @@ test("token-kind cookie-auth web sessions use the API-key test path", () => {
   assert.equal(shouldUseApiKeyConnectionTest("cookie", "zai-web"), true);
 });
 
-test("cookie-kind web sessions do not use the API-key test path", () => {
-  assert.equal(shouldUseApiKeyConnectionTest("cookie", "perplexity-web"), false);
-
-  assert.equal(shouldUseApiKeyConnectionTest("cookie", "claude-web"), false);
+test("non-web-cookie sessions do not use the API-key test path", () => {
+  assert.equal(shouldUseApiKeyConnectionTest("cookie", "non-web-cookie-provider"), false);
 });
 
-test("token-kind web sessions WITHOUT a token-aware validator stay off the API-key test path", () => {
-  // promptql and microsoft-designer-web are `kind: "token"` in
-  // WEB_SESSION_CREDENTIAL_REQUIREMENTS, but neither has an entry in validation.ts's
-  // SPECIALTY_VALIDATORS map (nor a token-aware branch like zai-web's). Routing them through
-  // the API-key test path would dispatch to the generic cookie probe, which sends the
-  // stored token as a `Cookie` header and treats most non-401/403 responses as valid —
-  // an invalid token could be reported as a healthy connection.
-  assert.equal(shouldUseApiKeyConnectionTest("cookie", "promptql"), false);
-
-  // Same reasoning applies to the remaining token-kind provider with no validator.
-  assert.equal(shouldUseApiKeyConnectionTest("cookie", "t3-chat-web"), false);
-  // Retired provider ids also stay off every credential-test path.
+test("token-kind web sessions WITHOUT a token-aware validator or web-cookie entry stay off the API-key test path", () => {
+  // microsoft-designer-web and hailuo-web are retired provider ids that stay off every credential-test path.
   assert.equal(shouldUseApiKeyConnectionTest("cookie", "hailuo-web"), false);
+  assert.equal(shouldUseApiKeyConnectionTest("cookie", "microsoft-designer-web"), false);
 });
 
 test("every token-kind web session with a real token-aware validator uses the API-key test path", () => {

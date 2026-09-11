@@ -1,3 +1,4 @@
+import { isWebCookieProvider } from "@/shared/constants/providers";
 import { getWebSessionCredentialRequirement } from "@/shared/providers/webSessionCredentials";
 
 /**
@@ -27,9 +28,16 @@ const TOKEN_AWARE_VALIDATED_WEB_SESSION_PROVIDERS = new Set([
 
 export function shouldUseApiKeyConnectionTest(authType: unknown, providerId: unknown): boolean {
   if (authType === "apikey") return true;
-  if (authType !== "cookie") return false;
-  if (getWebSessionCredentialRequirement(providerId)?.kind !== "token") return false;
-  return (
-    typeof providerId === "string" && TOKEN_AWARE_VALIDATED_WEB_SESSION_PROVIDERS.has(providerId)
-  );
+  if (authType === "cookie") {
+    if (typeof providerId === "string" && isWebCookieProvider(providerId)) {
+      return true;
+    }
+    if (getWebSessionCredentialRequirement(providerId)?.kind === "token") {
+      return (
+        typeof providerId === "string" &&
+        TOKEN_AWARE_VALIDATED_WEB_SESSION_PROVIDERS.has(providerId)
+      );
+    }
+  }
+  return false;
 }

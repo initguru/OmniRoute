@@ -827,6 +827,25 @@ export class GeminiWebExecutor extends BaseExecutor {
             await writer.write(encoder.encode(": ping\n\n"));
             let lastPingTime = Date.now();
 
+            // Send initial startup chunk so client watchdog and proxy stream readiness gates confirm readiness immediately
+            await writer.write(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  id: `chatcmpl-${streamReqId}`,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: modelId,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { role: "assistant" },
+                      finish_reason: null,
+                    },
+                  ],
+                })}\n\n`
+              )
+            );
+
             while (true) {
               if (signal?.aborted || abortedByClient) {
                 break;
@@ -945,7 +964,21 @@ export class GeminiWebExecutor extends BaseExecutor {
                   }
                 } else {
                   await writer.write(
-                    encoder.encode(`data: ${JSON.stringify(formatStreamChunk(text, modelId))}\n\n`)
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id: `chatcmpl-${streamReqId}`,
+                        object: "chat.completion.chunk",
+                        created: Math.floor(Date.now() / 1000),
+                        model: modelId,
+                        choices: [
+                          {
+                            index: 0,
+                            delta: { content: text },
+                            finish_reason: null,
+                          },
+                        ],
+                      })}\n\n`
+                    )
                   );
                   await writer.write(
                     encoder.encode(
@@ -954,6 +987,7 @@ export class GeminiWebExecutor extends BaseExecutor {
                   );
                   await writer.write(encoder.encode("data: [DONE]\n\n"));
                 }
+
                 break;
               }
             }

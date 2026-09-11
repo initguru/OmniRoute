@@ -629,3 +629,67 @@ test("GeminiWebExecutor routes model 'gweb/gemini-deep-think' to executeDirectDe
     playwright.chromium.launch = originalLaunch;
   }
 });
+
+test("GeminiWebExecutor emits initial startup chunk in streaming Deep Think", async () => {
+  clearGeminiWebSessionCache();
+  const mockHtml = `<html><head><script>window.WIZ_global_data={"SNlM0e":"at123","FdrFJe":"fsid123","cfb2h":"bl123"};</script></head></html>`;
+
+  const mockFetch = (async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/app")) {
+      return new Response(mockHtml, { status: 200, headers: { "Content-Type": "text/html" } });
+    }
+    if (url.includes("StreamGenerate")) {
+      return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+    }
+    if (url.includes("batchexecute")) {
+      return new Response(fixture.pollCompletedResponse, { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  }) as typeof fetch;
+
+  const executor = new GeminiWebExecutor();
+  const result = await executor.execute({
+    model: "gemini-deep-think",
+    body: { messages: [{ role: "user", content: "Reason through this" }], stream: true },
+    stream: true,
+    credentials: {
+      apiKey: "__Secure-1PSID=cookie-test",
+      providerSpecificData: { pollIntervalMs: 5 },
+    },
+    signal: AbortSignal.timeout(5000),
+    log: null,
+    fetch: mockFetch,
+  } as unknown as ExecuteInput);
+
+  assert.equal(result.response.status, 200);
+  assert.ok(result.response.body, "must have response body");
+
+  const reader = result.response.body.getReader();
+  const decoder = new TextDecoder();
+  let receivedText = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedText += decoder.decode(value, { stream: true });
+  }
+
+  // Verify ping was sent
+  assert.ok(receivedText.includes(": ping\n\n"), "must contain ping frame");
+
+  // Verify initial startup chunk was sent with role: 'assistant'
+  assert.ok(
+    receivedText.includes('"delta":{"role":"assistant"}'),
+    "must contain initial startup chunk with role assistant"
+  );
+
+  // Verify content chunk
+  assert.ok(
+    receivedText.includes('"delta":{"content":"Paris"}'),
+    "must contain content chunk with Paris"
+  );
+
+  // Verify done frame
+  assert.ok(receivedText.includes("data: [DONE]\n\n"), "must contain [DONE]");
+});

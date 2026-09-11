@@ -122,14 +122,27 @@ export function resolveStreamReadinessTimeout(
 ): StreamReadinessPolicyResult {
   const baseTimeoutMs = Math.max(0, Math.floor(input.baseTimeoutMs || 0));
   if (baseTimeoutMs <= 0) {
-    return { timeoutMs: baseTimeoutMs, baseTimeoutMs, maxTimeoutMs: baseTimeoutMs, reasons: ["disabled"] };
+    return {
+      timeoutMs: baseTimeoutMs,
+      baseTimeoutMs,
+      maxTimeoutMs: baseTimeoutMs,
+      reasons: ["disabled"],
+    };
   }
 
-  const maxTimeoutMs = Math.max(baseTimeoutMs, input.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS);
+  let maxTimeoutMs = Math.max(baseTimeoutMs, input.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS);
   const reasons: string[] = [];
   let timeoutMs = baseTimeoutMs;
 
+  const isGeminiDeepThink = /deep-think/i.test(input.model || "");
+  if (isGeminiDeepThink) {
+    timeoutMs = Math.max(timeoutMs, 600_000);
+    maxTimeoutMs = Math.max(maxTimeoutMs, 600_000);
+    reasons.push("gemini_deep_think_parallel_reasoning");
+  }
+
   const inputCount = countArrayField(input.body, "input");
+
   const messageCount = countArrayField(input.body, "messages");
   const itemCount = Math.max(inputCount, messageCount);
   const toolCount = countArrayField(input.body, "tools");

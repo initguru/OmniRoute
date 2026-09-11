@@ -337,3 +337,15 @@ test("does not treat an unrelated id containing 'thinking' as an alias suffix", 
   assert.equal(result.timeoutMs, 80_000);
   assert.ok(!result.reasons.includes("extended_thinking"));
 });
+
+test("gives gemini deep think models extended readiness timeout and cap", () => {
+  const result = resolveStreamReadinessTimeout({
+    baseTimeoutMs: 180_000,
+    model: "gemini-deep-think",
+    provider: "gemini-web",
+  });
+
+  assert.ok(result.timeoutMs >= 600_000, `timeoutMs was ${result.timeoutMs}`);
+  assert.ok(result.maxTimeoutMs >= 600_000, `maxTimeoutMs was ${result.maxTimeoutMs}`);
+  assert.ok(result.reasons.includes("gemini_deep_think_parallel_reasoning"));
+});

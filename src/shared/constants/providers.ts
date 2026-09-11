@@ -214,6 +214,13 @@ export function isLocalProvider(providerId: unknown): boolean {
   );
 }
 
+export function isWebCookieProvider(providerId: unknown): boolean {
+  return (
+    typeof providerId === "string" &&
+    Object.prototype.hasOwnProperty.call(WEB_COOKIE_PROVIDERS, providerId)
+  );
+}
+
 export const SELF_HOSTED_CHAT_PROVIDER_IDS = new Set([
   "mlx-gemma",
   "mlx-qwen",
