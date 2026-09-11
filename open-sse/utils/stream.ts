@@ -1099,7 +1099,8 @@ export function createSSEStream(options: StreamOptions = {}) {
       cacheHit: false,
       latencyMs: Date.now() - streamStartedAt,
       usage: timing.withTps(finalUsage),
-      costUsd, ttftMs: timing.ttftMs(),
+      costUsd,
+      ttftMs: timing.ttftMs(),
     });
     if (!comment) return;
     reqLogger?.appendConvertedChunk?.(comment);
@@ -2065,7 +2066,9 @@ export function createSSEStream(options: StreamOptions = {}) {
                   // estimate is now emitted in flush(), only when the upstream stayed silent.
                   if (isFinishChunk && hasValidUsage(usage) && !passthroughForwardedUsage) {
                     const buffered = addBufferToUsage(usage);
-                    parsed.usage = timing.withTps(filterUsageForFormat(buffered, sourceFormat || FORMATS.OPENAI));
+                    parsed.usage = timing.withTps(
+                      filterUsageForFormat(buffered, sourceFormat || FORMATS.OPENAI)
+                    );
                     output = `data: ${JSON.stringify(parsed)}\n\n`;
                     passthroughForwardedUsage = true;
                     injectedUsage = true;
@@ -2225,8 +2228,16 @@ export function createSSEStream(options: StreamOptions = {}) {
             for (const part of geminiChunk.candidates[0].content.parts) {
               if (part.text && typeof part.text === "string") {
                 totalContentLength += part.text.length;
-                if (state?.accumulatedContent !== undefined)
+                if (part.thought === true) {
+                  if (state?.accumulatedReasoning !== undefined) {
+                    state.accumulatedReasoning = appendBoundedText(
+                      state.accumulatedReasoning,
+                      part.text
+                    );
+                  }
+                } else if (state?.accumulatedContent !== undefined) {
                   state.accumulatedContent = appendBoundedText(state.accumulatedContent, part.text);
+                }
               }
             }
           }
@@ -2590,7 +2601,9 @@ export function createSSEStream(options: StreamOptions = {}) {
                   created: Math.floor(Date.now() / 1000),
                   model,
                   choices: [],
-                  usage: timing.withTps(filterUsageForFormat(usage, sourceFormat || FORMATS.OPENAI)),
+                  usage: timing.withTps(
+                    filterUsageForFormat(usage, sourceFormat || FORMATS.OPENAI)
+                  ),
                 };
                 const usageOutput = `data: ${JSON.stringify(usageOnlyChunk)}\n\n`;
                 reqLogger?.appendConvertedChunk?.(usageOutput);
