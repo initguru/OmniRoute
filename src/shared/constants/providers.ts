@@ -267,6 +267,7 @@ export function providerAllowsOptionalApiKey(providerId: unknown): boolean {
   return (
     // ponytail: any noAuth provider auto-qualifies — no per-provider maintenance
     (typeof providerId === "string" && providerId in NOAUTH_PROVIDERS) ||
+    isWebCookieProvider(providerId) ||
     (typeof providerId === "string" && EXPLICIT_OPTIONAL_APIKEY_PROVIDER_IDS.has(providerId)) ||
     isLocalProvider(providerId) ||
     isSelfHostedChatProvider(providerId) ||

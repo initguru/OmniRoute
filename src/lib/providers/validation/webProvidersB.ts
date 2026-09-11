@@ -135,7 +135,8 @@ export async function validateAdaptaWebProvider({ apiKey, providerSpecificData =
 
 export async function validateClaudeWebProvider({ apiKey, providerSpecificData = {} }: any) {
   try {
-    const cookieHeader = normalizeSessionCookieHeader(String(apiKey || ""), "sessionKey");
+    const raw = String(apiKey || providerSpecificData?.cookie || "");
+    const cookieHeader = normalizeSessionCookieHeader(raw, "sessionKey");
     if (!cookieHeader) {
       return { valid: false, error: "Paste your sessionKey cookie from claude.ai" };
     }
@@ -209,7 +210,7 @@ export async function validateClaudeWebProvider({ apiKey, providerSpecificData =
 // ── Gemini Web cookie validator ──
 export async function validateGeminiWebProvider({ apiKey, providerSpecificData = {} }: any) {
   try {
-    const raw = String(apiKey || "").trim();
+    const raw = String(apiKey || providerSpecificData?.cookie || "").trim();
     if (!raw) {
       return { valid: false, error: "Paste your __Secure-1PSID cookie from gemini.google.com" };
     }

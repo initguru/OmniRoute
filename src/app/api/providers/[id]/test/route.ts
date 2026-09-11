@@ -834,7 +834,8 @@ export async function testOAuthConnection(
  */
 async function testApiKeyConnection(connection: any) {
   const requiresApiKey = !providerAllowsOptionalApiKey(connection.provider);
-  if (requiresApiKey && !connection.apiKey) {
+  const cookie = connection.providerSpecificData?.cookie;
+  if (requiresApiKey && !connection.apiKey && !cookie) {
     const error = "Missing API key";
     return {
       valid: false,
@@ -846,7 +847,7 @@ async function testApiKeyConnection(connection: any) {
   const result = projectProviderValidationResultForPublicResponse(
     await validateProviderApiKey({
       provider: connection.provider,
-      apiKey: connection.apiKey,
+      apiKey: connection.apiKey || cookie,
       providerSpecificData: connection.providerSpecificData,
     })
   );
