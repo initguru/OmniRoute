@@ -191,6 +191,47 @@ describe("Gemini Web Direct Protocol", () => {
       assert.equal(mockFetch.mock.callCount(), 1);
     });
 
+    it("should extract tokens and return mergedCookie when Set-Cookie headers are present in bootstrap response", async () => {
+      const mockHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script>
+            window.WIZ_global_data = {
+              "SNlM0e": "AOvx0lMockAtToken:1789047456",
+              "FdrFJe": "-7998873305294431664",
+              "cfb2h": "boq_assistant-bard-web-server_20260907.07_p0"
+            };
+          </script>
+        </head>
+        <body></body>
+        </html>
+      `;
+
+      const headers = new Headers();
+      headers.set("content-type", "text/html");
+      headers.append("set-cookie", "__Secure-1PSIDTS=new_ts_123; Path=/; Domain=.google.com");
+
+      const mockFetch = mock.fn(async () => {
+        return new Response(mockHtml, {
+          status: 200,
+          headers,
+        });
+      });
+
+      const initialCookie = "__Secure-1PSID=sid_val; __Secure-1PSIDTS=old_ts_val";
+      const session = await bootstrapGeminiWebSession(initialCookie, undefined, {
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      assert.equal(session.atToken, "AOvx0lMockAtToken:1789047456");
+      assert.equal(session.fSid, "-7998873305294431664");
+      assert.equal(session.buildLabel, "boq_assistant-bard-web-server_20260907.07_p0");
+      assert.ok(session.mergedCookie, "mergedCookie should be defined");
+      assert.ok(session.mergedCookie.includes("__Secure-1PSIDTS=new_ts_123"));
+      assert.ok(session.mergedCookie.includes("__Secure-1PSID=sid_val"));
+    });
+
     it("should throw when HTML is missing required tokens (e.g. unauthenticated)", async () => {
       const mockHtml = `<html><body><a href="https://accounts.google.com/signin">Sign in</a></body></html>`;
       const mockFetch = mock.fn(async () => {
@@ -203,6 +244,31 @@ describe("Gemini Web Direct Protocol", () => {
       await assert.rejects(
         async () => {
           await bootstrapGeminiWebSession("invalid_cookie", undefined, {
+            fetchFn: mockFetch as unknown as typeof fetch,
+          });
+        },
+        {
+          message: /Failed to extract Gemini Web session tokens/,
+        }
+      );
+    });
+
+    it("should throw when response URL or redirect indicates Google login page", async () => {
+      const mockFetch = mock.fn(async () => {
+        const resp = new Response("<html>Login required</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+        Object.defineProperty(resp, "url", {
+          value:
+            "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fgemini.google.com%2Fapp",
+        });
+        return resp;
+      });
+
+      await assert.rejects(
+        async () => {
+          await bootstrapGeminiWebSession("__Secure-1PSID=expired", undefined, {
             fetchFn: mockFetch as unknown as typeof fetch,
           });
         },

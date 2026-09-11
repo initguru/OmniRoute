@@ -35,6 +35,9 @@ import {
   bootstrapGeminiWebSession,
   type GeminiWebSessionTokens,
 } from "./gemini-web/directProtocol.ts";
+import { parseCookies, mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
+
+export { mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -335,36 +338,6 @@ export async function buildGeminiToolResponse(
 }
 
 /**
- * Parse cookie string, stripping attributes (Path, Domain, Expires, etc.)
- * Input: full browser cookie string or just "name=value; name2=value2"
- * Output: array of { name, value } pairs
- */
-function parseCookies(raw: string): Array<{ name: string; value: string }> {
-  return raw
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const eqIdx = part.indexOf("=");
-      if (eqIdx === -1) return null;
-      const name = part.substring(0, eqIdx).trim();
-      const value = part.substring(eqIdx + 1).trim();
-      // Skip cookie attributes that aren't name=value pairs
-      if (!name || !value) return null;
-      const lowerName = name.toLowerCase();
-      if (
-        ["path", "domain", "expires", "max-age", "secure", "httponly", "samesite"].includes(
-          lowerName
-        )
-      ) {
-        return null;
-      }
-      return { name, value };
-    })
-    .filter(Boolean) as Array<{ name: string; value: string }>;
-}
-
-/**
  * Parse Gemini StreamGenerate response text.
  *
  * Response format:
@@ -431,40 +404,6 @@ function readProviderSpecificString(
     if (value) return value;
   }
   return "";
-}
-
-/**
- * Merge rotated __Secure-1PSID* cookies read back from the live Playwright
- * cookie jar into the original cookie string. Only the three long-lived
- * Gemini auth cookies are considered — pulling in the entire jar would risk
- * treating short-lived Google analytics/consent cookies as credentials
- * (#7676). Cookies the jar didn't return, or that are unchanged, are left
- * untouched in the original string.
- */
-export function mergeRotatedGeminiCookies(
-  originalCookie: string,
-  jarCookies: Array<{ name: string; value: string }>
-): string {
-  const ROTATABLE_NAMES = ["__Secure-1PSID", "__Secure-1PSIDTS", "__Secure-1PSIDCC"];
-  const jarByName = new Map(jarCookies.map((c) => [c.name, c.value]));
-
-  const pairs = parseCookies(originalCookie);
-  const seen = new Set<string>();
-  const merged = pairs.map(({ name, value }) => {
-    seen.add(name);
-    if (ROTATABLE_NAMES.includes(name) && jarByName.has(name)) {
-      return { name, value: jarByName.get(name) as string };
-    }
-    return { name, value };
-  });
-
-  for (const name of ROTATABLE_NAMES) {
-    if (!seen.has(name) && jarByName.has(name)) {
-      merged.push({ name, value: jarByName.get(name) as string });
-    }
-  }
-
-  return merged.map(({ name, value }) => `${name}=${value}`).join("; ");
 }
 
 export function resolveGeminiWebCookie(
@@ -663,7 +602,8 @@ export class GeminiWebExecutor extends BaseExecutor {
     hasTools: boolean;
     requestedTools: unknown;
   }) {
-    const { input, cookie, prompt, modelId, hasTools, requestedTools } = params;
+    let { cookie } = params;
+    const { input, prompt, modelId, hasTools, requestedTools } = params;
     const { body, stream, credentials, signal, log, onCredentialsRefreshed } = input;
     const fetchFn = (input as { fetch?: typeof fetch }).fetch ?? fetch;
 
@@ -689,11 +629,30 @@ export class GeminiWebExecutor extends BaseExecutor {
       }
       if (!sessionTokens) {
         try {
-          sessionTokens = await bootstrapGeminiWebSession(cookie, signal ?? undefined, {
+          const bootstrapResult = await bootstrapGeminiWebSession(cookie, signal ?? undefined, {
             fetchFn,
             timeoutMs: Math.min(timeoutMs, 15000),
           });
-          setCachedSession(cookie, sessionTokens);
+          sessionTokens = bootstrapResult;
+          if (bootstrapResult.mergedCookie && bootstrapResult.mergedCookie !== cookie) {
+            const oldCookie = cookie;
+            cookie = bootstrapResult.mergedCookie;
+            try {
+              await onCredentialsRefreshed?.({
+                ...credentials,
+                apiKey: bootstrapResult.mergedCookie,
+              });
+            } catch (err) {
+              log?.warn?.(
+                "GEMINI-WEB",
+                `Failed to persist rotated cookie from bootstrap: ${err instanceof Error ? err.message : String(err)}`
+              );
+            }
+            setCachedSession(cookie, sessionTokens);
+            setCachedSession(oldCookie, sessionTokens);
+          } else {
+            setCachedSession(cookie, sessionTokens);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log?.warn?.("GEMINI-WEB", `Failed to bootstrap Gemini Web session: ${msg}`);

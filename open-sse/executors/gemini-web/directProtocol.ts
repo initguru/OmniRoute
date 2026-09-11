@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { parseCookies, mergeRotatedGeminiCookies } from "./cookieUtils.ts";
 
 export const GEMINI_DEEP_THINK_MODEL_ID = "797f3d0293f288ad";
 
@@ -13,6 +14,10 @@ export interface GeminiWebSessionTokens {
   atToken: string;
   fSid: string;
   buildLabel: string;
+}
+
+export interface GeminiWebSessionBootstrapResult extends GeminiWebSessionTokens {
+  mergedCookie?: string;
 }
 
 export interface StreamGenerateOptions {
@@ -372,7 +377,7 @@ export async function bootstrapGeminiWebSession(
   cookie: string,
   signal?: AbortSignal,
   options?: BootstrapSessionOptions
-): Promise<GeminiWebSessionTokens> {
+): Promise<GeminiWebSessionBootstrapResult> {
   const fetchFn = options?.fetchFn ?? fetch;
   const timeoutMs = options?.timeoutMs ?? 15000;
   const combinedSignal = createCombinedSignal(signal, timeoutMs);
@@ -391,6 +396,19 @@ export async function bootstrapGeminiWebSession(
     throw new Error(`Failed to fetch Gemini Web session: HTTP ${res.status}`);
   }
 
+  const responseUrl = res.url || "";
+  const locationHeader = res.headers.get("location") || "";
+  if (
+    responseUrl.includes("accounts.google.com") ||
+    responseUrl.includes("ServiceLogin") ||
+    locationHeader.includes("accounts.google.com") ||
+    locationHeader.includes("ServiceLogin")
+  ) {
+    throw new Error(
+      "Failed to extract Gemini Web session tokens: redirected to login. Cookie may be expired or invalid."
+    );
+  }
+
   const html = await res.text();
 
   const atToken =
@@ -405,9 +423,25 @@ export async function bootstrapGeminiWebSession(
     );
   }
 
+  const getSetCookie = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookieHeaders =
+    typeof getSetCookie === "function"
+      ? getSetCookie.call(res.headers)
+      : [res.headers.get("set-cookie")].filter((c): c is string => Boolean(c));
+
+  let mergedCookie: string | undefined;
+  if (setCookieHeaders.length > 0) {
+    const jarCookies = setCookieHeaders.flatMap((header) => parseCookies(header));
+    const merged = mergeRotatedGeminiCookies(cookie, jarCookies);
+    if (merged && merged !== cookie) {
+      mergedCookie = merged;
+    }
+  }
+
   return {
     atToken,
     fSid,
     buildLabel,
+    ...(mergedCookie ? { mergedCookie } : {}),
   };
 }

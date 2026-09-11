@@ -490,6 +490,76 @@ describe("GeminiWebExecutor Direct API (gemini-deep-think)", () => {
     assert.equal(appFetchCount, 2, "/app must be re-fetched after cache clear");
   });
 
+  it("captures rotated cookies from bootstrap /app and persists via onCredentialsRefreshed and updates StreamGenerate Cookie", async () => {
+    let capturedStreamCookie = "";
+    let refreshedCreds: Record<string, unknown> | null = null;
+
+    const mockFetch = mock.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.includes("/app")) {
+        const headers = new Headers();
+        headers.set("Content-Type", "text/html");
+        headers.append(
+          "Set-Cookie",
+          "__Secure-1PSIDTS=rotated-ts-from-bootstrap; Path=/; Domain=.google.com"
+        );
+        return new Response(MOCK_HTML_SESSION, {
+          status: 200,
+          headers,
+        });
+      }
+
+      if (url.includes("StreamGenerate")) {
+        const headers = init?.headers as Record<string, string> | undefined;
+        capturedStreamCookie = headers?.Cookie || headers?.cookie || "";
+        return new Response(fixture.streamGenerateInitialResponse, { status: 200 });
+      }
+
+      if (url.includes("batchexecute")) {
+        return new Response(fixture.pollCompletedResponse, { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    });
+
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: {
+        messages: [{ role: "user", content: "Test bootstrap cookie rotation" }],
+        stream: false,
+      },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=orig-sid; __Secure-1PSIDTS=old-ts",
+        providerSpecificData: { pollIntervalMs: 5 },
+      },
+      signal: AbortSignal.timeout(5000),
+      log: null,
+      fetch: mockFetch as unknown as typeof fetch,
+      onCredentialsRefreshed: async (creds) => {
+        refreshedCreds = creds;
+      },
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+    assert.ok(
+      refreshedCreds,
+      "onCredentialsRefreshed must be called when bootstrap rotates cookies"
+    );
+    assert.ok(
+      typeof refreshedCreds.apiKey === "string" &&
+        refreshedCreds.apiKey.includes("__Secure-1PSIDTS=rotated-ts-from-bootstrap"),
+      "refreshed apiKey must contain rotated __Secure-1PSIDTS from bootstrap"
+    );
+    assert.ok(
+      capturedStreamCookie.includes("__Secure-1PSIDTS=rotated-ts-from-bootstrap"),
+      "StreamGenerate request must use the fresh rotated cookie"
+    );
+  });
+
   it("resolves static session tokens from credentials.providerSpecificData and skips session bootstrap", async () => {
     const urlsCalled: string[] = [];
     let streamBodyCaptured = "";
