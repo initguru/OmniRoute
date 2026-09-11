@@ -158,7 +158,7 @@ async function doRecoverGeminiWebSessionWithBrowser(
       const hasEditor = Boolean(doc?.querySelector?.(".ql-editor, [contenteditable='true']"));
       const atToken = wiz?.["SNlM0e"];
 
-      if (hasSignIn || (!hasEditor && !atToken)) {
+      if (!atToken && (hasSignIn || !hasEditor)) {
         return { __loginRequired: true, wiz };
       }
 
