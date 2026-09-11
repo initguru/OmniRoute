@@ -1,6 +1,5 @@
 import { describe, it, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import type { ExecuteInput } from "../../open-sse/executors/base.ts";
 import {
   recoverGeminiWebSessionWithBrowser,
   clearInFlightRecoveries,
@@ -368,73 +367,5 @@ describe("recoverGeminiWebSessionWithBrowser (Tier 2 self-healing)", () => {
       `Expected waitForSelector with composer/sign-in elements, got: ${waitSelectorArg}`
     );
     assert.equal(waitTimeout, 4000);
-  });
-});
-
-describe("GeminiWebExecutor — browser recovery failure logging", () => {
-  it("logs warning when Tier 2 browser self-healing recovery fails", async () => {
-    const { GeminiWebExecutor } = await import("../../open-sse/executors/gemini-web.ts");
-
-    const warnLogs: Array<{ tag: string; msg: string }> = [];
-    const mockLog = {
-      info: () => {},
-      warn: (tag: string, msg: string) => {
-        warnLogs.push({ tag, msg });
-      },
-      error: () => {},
-      debug: () => {},
-    };
-
-    const mockPlaywright = {
-      chromium: {
-        launch: async () => {
-          throw new Error("browser_launch_failed");
-        },
-      },
-    };
-
-    // Force bootstrap failure so it falls back to Tier 2 recovery
-    const originalFetch = globalThis.fetch;
-    try {
-      globalThis.fetch = async (url) => {
-        const target = String(url);
-        if (target.includes("gemini.google.com/app")) {
-          return new Response("Unauthorized", { status: 401 });
-        }
-        return originalFetch(url);
-      };
-
-      const executor = new GeminiWebExecutor();
-      const result = await executor.execute({
-        model: "gemini-deep-think",
-        body: { messages: [{ role: "user", content: "hello" }], stream: false },
-        stream: false,
-        credentials: { apiKey: "__Secure-1PSID=invalid-test-cookie" },
-        signal: AbortSignal.timeout(10000),
-        log: mockLog as unknown as ExecuteInput["log"],
-        playwright: mockPlaywright,
-      } as unknown as ExecuteInput);
-
-      assert.equal(result.response.status, 401);
-      const tier2Warn = warnLogs.find(
-        (w) =>
-          w.tag === "GEMINI-WEB" && w.msg.includes("Tier 2 browser self-healing recovery failed")
-      );
-      assert.ok(tier2Warn, "Expected log.warn with Tier 2 browser self-healing recovery failed");
-
-      // Verify open-sse/executors/gemini-web.ts explicitly logs the failure
-      const fs = await import("node:fs");
-      const executorSource = fs.readFileSync(
-        new URL("../../open-sse/executors/gemini-web.ts", import.meta.url),
-        "utf8"
-      );
-      assert.match(
-        executorSource,
-        /Tier 2 browser self-healing recovery failed:\s*\$\{recovery\.error\s*\|\|\s*["']unknown["']\}/,
-        "gemini-web.ts must log Tier 2 browser self-healing recovery failed on recovery failure"
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
   });
 });

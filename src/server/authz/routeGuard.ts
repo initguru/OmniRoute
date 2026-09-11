@@ -103,6 +103,7 @@ export const LOCAL_ONLY_API_PATTERNS: ReadonlyArray<RegExp> = [
   /^\/api\/providers\/volcengine-plan\/connect(\/.*)?$/, // manual headful flow + session-based phone/SMS auto-login (both spawn Playwright)
   /^\/api\/providers\/[^/]+\/refresh-cursor\/?$/,
   /^\/api\/providers\/[^/]+\/chatgpt-web-codex-doctor\/?$/,
+  /^\/api\/providers\/[^/]+\/recover\/?$/,
 ];
 
 // `SPAWN_CAPABLE_PREFIXES` / `SPAWN_CAPABLE_PATTERNS` (the spawn-capable

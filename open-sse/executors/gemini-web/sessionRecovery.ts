@@ -148,7 +148,7 @@ async function doRecoverGeminiWebSessionWithBrowser(
       return { success: false, error: "failed_to_create_page" };
     }
 
-    const navTimeout = timeoutMs ? Math.min(timeoutMs, 15000) : 15000;
+    const navTimeout = timeoutMs ?? 15000;
     await page.goto("https://gemini.google.com/app", {
       waitUntil: "domcontentloaded",
       timeout: navTimeout,
