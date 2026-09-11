@@ -38,7 +38,14 @@ interface RecoveryPage {
 
 interface RecoveryContext {
   addCookies: (
-    cookies: Array<{ name: string; value: string; domain: string; path: string }>
+    cookies: Array<{
+      name: string;
+      value: string;
+      domain?: string;
+      url?: string;
+      path?: string;
+      secure?: boolean;
+    }>
   ) => Promise<void>;
   newPage: () => Promise<RecoveryPage>;
   cookies: (urls?: string[]) => Promise<Array<{ name: string; value: string }>>;
@@ -115,13 +122,24 @@ async function doRecoverGeminiWebSessionWithBrowser(
     const cookiePairs = parseCookies(cookie);
     if (cookiePairs.length > 0) {
       await context.addCookies(
-        cookiePairs.map(({ name, value }) => ({
-          name,
-          value,
-          domain: ".google.com",
-          path: "/",
-          secure: true,
-        }))
+        cookiePairs.map(({ name, value }) => {
+          if (name.startsWith("__Host-")) {
+            return {
+              name,
+              value,
+              url: "https://gemini.google.com",
+              path: "/",
+              secure: true,
+            };
+          }
+          return {
+            name,
+            value,
+            domain: ".google.com",
+            path: "/",
+            secure: true,
+          };
+        })
       );
     }
 
@@ -140,6 +158,13 @@ async function doRecoverGeminiWebSessionWithBrowser(
     if (currentUrl.includes("accounts.google.com") || currentUrl.includes("ServiceLogin")) {
       return { success: false, error: "login_required" };
     }
+
+    await page
+      .waitForSelector(
+        ".ql-editor, [contenteditable='true'], a[href*='ServiceLogin'], button[aria-label*='Sign in'], button[aria-label*='로그인']",
+        { timeout: 4000 }
+      )
+      .catch(() => {});
 
     let evalResult = (await page.evaluate(() => {
       const win = (typeof window !== "undefined" ? window : globalThis) as unknown as {

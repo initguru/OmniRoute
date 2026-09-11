@@ -513,7 +513,7 @@ export class GeminiWebExecutor extends BaseExecutor {
           : ([headers.get("set-cookie")].filter(Boolean) as string[]);
       if (setCookies.length === 0) return;
 
-      const jarCookies = setCookies.flatMap((header) => parseCookies(header));
+      const jarCookies = setCookies.flatMap((header: string) => parseCookies(header));
       const mergedCookie = mergeRotatedGeminiCookies(cookie, jarCookies);
       if (mergedCookie && mergedCookie !== cookie) {
         await onCredentialsRefreshed({ ...credentials, apiKey: mergedCookie });
@@ -685,6 +685,10 @@ export class GeminiWebExecutor extends BaseExecutor {
               "Tier 2 browser self-healing recovery succeeded; proceeding with Direct API request."
             );
           } else {
+            log?.warn?.(
+              "GEMINI-WEB",
+              `Tier 2 browser self-healing recovery failed: ${recovery.error || "unknown"}`
+            );
             return {
               response: new Response(
                 JSON.stringify(
@@ -1327,13 +1331,24 @@ export class GeminiWebExecutor extends BaseExecutor {
       // Parse cookies — strips attributes like Path, Domain, Expires
       const cookiePairs = parseCookies(cookie);
       await context.addCookies(
-        cookiePairs.map(({ name, value }) => ({
-          name,
-          value,
-          domain: ".google.com",
-          path: "/",
-          secure: true,
-        }))
+        cookiePairs.map(({ name, value }) => {
+          if (name.startsWith("__Host-")) {
+            return {
+              name,
+              value,
+              url: "https://gemini.google.com",
+              path: "/",
+              secure: true,
+            };
+          }
+          return {
+            name,
+            value,
+            domain: ".google.com",
+            path: "/",
+            secure: true,
+          };
+        })
       );
 
       const page = await context.newPage();

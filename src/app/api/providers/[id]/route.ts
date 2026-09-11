@@ -35,6 +35,7 @@ import {
   encodeChatGptWebCodexSecrets,
 } from "@omniroute/open-sse/services/chatgptWebCodexAdmin.ts";
 import { rejectRetiredCommonChatGptWebProvider } from "@/lib/providers/chatgptWebRetirementResponse";
+import { autoRefreshDaemon } from "@omniroute/open-sse/services/autoRefreshDaemon";
 
 function normalizeCodexLimitPolicy(
   incoming: unknown,
@@ -215,7 +216,8 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     // the override (connection follows the global default); 0-1440 = explicit
     // per-connection minutes (0 opts this connection out of the sweep).
     if (healthCheckInterval === null) updateData.healthCheckInterval = null;
-    else if (healthCheckInterval !== undefined) updateData.healthCheckInterval = healthCheckInterval;
+    else if (healthCheckInterval !== undefined)
+      updateData.healthCheckInterval = healthCheckInterval;
     if (group !== undefined) updateData.group = group;
     if (maxConcurrent !== undefined) updateData.maxConcurrent = maxConcurrent;
     if (incomingWindowThresholds !== undefined) {
@@ -342,6 +344,19 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     }
 
     const updated = await updateProviderConnection(id, updateData);
+
+    if (existing.provider === "gemini-web") {
+      const effectiveApiKey = updateData.apiKey || existing.apiKey;
+      if (effectiveApiKey) {
+        autoRefreshDaemon.registerCredential(
+          "gemini-web",
+          effectiveApiKey,
+          async (refreshedCookie: string) => {
+            await updateProviderConnection(id, { apiKey: refreshedCookie });
+          }
+        );
+      }
+    }
 
     // If rateLimitOverrides was included in the request, refresh the in-memory
     // rate limiter state so the change takes effect without a server restart.

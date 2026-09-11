@@ -314,7 +314,7 @@ export async function registerQuotaFetchers(): Promise<void> {
         id: typeof node.id === "string" ? node.id : null,
         prefix: typeof node.prefix === "string" ? node.prefix : null,
         baseUrl: typeof node.baseUrl === "string" ? node.baseUrl : null,
-      })),
+      }))
     );
   } catch (error) {
     console.warn("[STARTUP] Moonshot custom-node fetcher scan skipped:", error);
@@ -325,6 +325,44 @@ export async function registerQuotaFetchers(): Promise<void> {
   registerGenericQuotaFetchers();
 
   console.log("[STARTUP] Quota fetchers registered");
+}
+
+/**
+ * Load active gemini-web connections and register them with autoRefreshDaemon
+ * so cookie validity and rotation are tracked in the background.
+ */
+export async function initGeminiWebAutoRefresh(deps?: {
+  getRawProviderConnections?: (
+    filter?: Record<string, unknown>
+  ) => Promise<Array<Record<string, unknown>>>;
+  updateProviderConnection?: (id: string, data: Record<string, unknown>) => Promise<unknown>;
+}): Promise<void> {
+  try {
+    const getRaw =
+      deps?.getRawProviderConnections ??
+      (await import("@/lib/db/providers")).getRawProviderConnections;
+    const updateConn =
+      deps?.updateProviderConnection ??
+      (await import("@/lib/db/providers")).updateProviderConnection;
+    const { autoRefreshDaemon } = await import("@omniroute/open-sse/services/autoRefreshDaemon");
+    const connections = await getRaw({ provider: "gemini-web" });
+    for (const conn of connections) {
+      if (conn.isActive === false || conn.isActive === 0) continue;
+      const cookie = (conn.apiKey || conn.cookie) as string | undefined;
+      if (cookie) {
+        autoRefreshDaemon.registerCredential(
+          "gemini-web",
+          cookie,
+          async (refreshedCookie: string) => {
+            await updateConn(conn.id as string, { apiKey: refreshedCookie });
+          }
+        );
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[STARTUP] Failed to initialize gemini-web auto-refresh (non-fatal):", msg);
+  }
 }
 
 export async function registerNodejs(): Promise<void> {
@@ -622,7 +660,10 @@ export async function registerNodejs(): Promise<void> {
         }),
 
       import("@omniroute/open-sse/services/autoRefreshDaemon")
-        .then((m) => m.autoRefreshDaemon.start())
+        .then(async (m) => {
+          await initGeminiWebAutoRefresh();
+          m.autoRefreshDaemon.start();
+        })
         .catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn("[STARTUP] Auto-refresh daemon failed to start (non-fatal):", msg);
@@ -630,12 +671,14 @@ export async function registerNodejs(): Promise<void> {
 
       // Conductor bridge (PRD Conductor RF1): mirrors OmniConductor hub tasks into the
       // A2A TaskManager via the hub SSE. Opt-in — self-gated on CONDUCTOR_HUB_URL.
-      import("@/lib/conductor/boot").then((m) => {
-        if (m.initConductorBridge()) console.log("[STARTUP] Conductor bridge started");
-      }).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn("[STARTUP] Conductor bridge failed to start (non-fatal):", msg);
-      }),
+      import("@/lib/conductor/boot")
+        .then((m) => {
+          if (m.initConductorBridge()) console.log("[STARTUP] Conductor bridge started");
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn("[STARTUP] Conductor bridge failed to start (non-fatal):", msg);
+        }),
 
       // Proactive connection-cooldown recovery (#8): re-validate connections whose
       // transient `rate_limited_until` window has elapsed OUTSIDE the request hot path,

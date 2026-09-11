@@ -237,6 +237,19 @@ export async function validateGeminiWebProvider({ apiKey, providerSpecificData =
       };
     }
 
+    if (response.status === 200) {
+      const html = await response.text();
+      const hasSnlm0e = html.includes('"SNlM0e":') || html.includes('"SNlM0e",');
+      if (!hasSnlm0e) {
+        return {
+          valid: false,
+          error:
+            "Invalid or expired Gemini Web session: SNlM0e token not found (guest session). Please re-login at gemini.google.com and paste fresh cookies.",
+        };
+      }
+      return { valid: true, error: null };
+    }
+
     // 200/302 = valid, anything < 500 that isn't auth failure is acceptable
     if (response.status < 500) {
       return { valid: true, error: null };
