@@ -406,6 +406,7 @@ export function getWebSessionCredentialRequirement(
 export function canUpdateProviderApiKey(authType: unknown, providerId: unknown): boolean {
   if (authType === "apikey") return true;
   if (authType !== "cookie") return false;
+  if (providerId === "gemini-web") return true;
   return getWebSessionCredentialRequirement(providerId)?.kind === "token";
 }
 

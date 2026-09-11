@@ -141,10 +141,39 @@ async function doRecoverGeminiWebSessionWithBrowser(
       return { success: false, error: "login_required" };
     }
 
-    let wizData = (await page.evaluate(() => {
-      return (window as unknown as { WIZ_global_data?: Record<string, string> }).WIZ_global_data;
-    })) as Record<string, string> | undefined;
+    let evalResult = (await page.evaluate(() => {
+      const win = (typeof window !== "undefined" ? window : globalThis) as unknown as {
+        WIZ_global_data?: Record<string, string>;
+      };
+      const wiz = win?.WIZ_global_data;
+      const doc = typeof document !== "undefined" ? document : null;
+      const text = doc?.body ? doc.body.innerText || "" : "";
+      const hasSignIn =
+        /Sign in|로그인/i.test(text) ||
+        Boolean(
+          doc?.querySelector?.(
+            'a[href*="ServiceLogin"], a[href*="accounts.google.com"], [data-action="signin"], button[aria-label*="Sign in"], button[aria-label*="로그인"], [data-action="sign-in"]'
+          )
+        );
+      const hasEditor = Boolean(doc?.querySelector?.(".ql-editor, [contenteditable='true']"));
+      const atToken = wiz?.["SNlM0e"];
 
+      if (hasSignIn || (!hasEditor && !atToken)) {
+        return { __loginRequired: true, wiz };
+      }
+
+      return wiz;
+    })) as Record<string, unknown> | undefined;
+
+    if (
+      evalResult?.["__loginRequired"] ||
+      evalResult?.["login_required"] ||
+      evalResult?.["isLoginRequired"]
+    ) {
+      return { success: false, error: "login_required" };
+    }
+
+    let wizData = (evalResult?.["wiz"] ?? evalResult) as Record<string, string> | undefined;
     let atToken = wizData?.["SNlM0e"];
     let fSid = wizData?.["FdrFJe"];
     let buildLabel = wizData?.["cfb2h"];
@@ -152,10 +181,13 @@ async function doRecoverGeminiWebSessionWithBrowser(
     if (!atToken || !fSid || !buildLabel) {
       try {
         await page.waitForSelector(".ql-editor, [contenteditable='true']", { timeout: 5000 });
-        wizData = (await page.evaluate(() => {
-          return (window as unknown as { WIZ_global_data?: Record<string, string> })
-            .WIZ_global_data;
-        })) as Record<string, string> | undefined;
+        const secondResult = (await page.evaluate(() => {
+          const win = (typeof window !== "undefined" ? window : globalThis) as unknown as {
+            WIZ_global_data?: Record<string, string>;
+          };
+          return win?.WIZ_global_data;
+        })) as Record<string, unknown> | undefined;
+        wizData = (secondResult?.["wiz"] ?? secondResult) as Record<string, string> | undefined;
         atToken = wizData?.["SNlM0e"];
         fSid = wizData?.["FdrFJe"];
         buildLabel = wizData?.["cfb2h"];

@@ -160,8 +160,9 @@ export const WEB_COOKIE_PROVIDERS_WITHOUT_MODELS_API = new Set([
 // served, and a 401/403 from a console page is not a credential signal either. Unlike
 // WEB_COOKIE_PROVIDERS_WITHOUT_MODELS_API these providers are therefore not probed at
 // all: validation stays the honest "unsupported" it reported before the registry entry
-// existed, decided BEFORE any network call.
-export const WEB_COOKIE_PROVIDERS_WITHOUT_AUTH_PROBE = new Set(["gemini-business"]);
+// existed, decided BEFORE any network call. gemini-web is also registered here to
+// prevent non-existent /app/models probes from falsely marking valid sessions as expired.
+export const WEB_COOKIE_PROVIDERS_WITHOUT_AUTH_PROBE = new Set(["gemini-business", "gemini-web"]);
 
 export function toWebCookieValidationErrorResult(provider: string, error: unknown) {
   if (

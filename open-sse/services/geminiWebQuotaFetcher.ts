@@ -77,9 +77,16 @@ export async function fetchGeminiWebQuota(
   ) as Record<string, unknown> | undefined;
 
   let sessionTokens = resolveStaticSessionTokens(credPsd, connPsd);
+  let effectiveCookie = cookie;
   if (!sessionTokens) {
     try {
-      sessionTokens = await bootstrapGeminiWebSession(cookie, undefined, { timeoutMs: 15000 });
+      const bootstrapResult = await bootstrapGeminiWebSession(cookie, undefined, {
+        timeoutMs: 15000,
+      });
+      sessionTokens = bootstrapResult;
+      if (bootstrapResult?.mergedCookie) {
+        effectiveCookie = bootstrapResult.mergedCookie;
+      }
     } catch {
       return null;
     }
@@ -87,6 +94,11 @@ export async function fetchGeminiWebQuota(
 
   if (!sessionTokens) {
     return null;
+  }
+
+  const candidateMergedCookie = (sessionTokens as { mergedCookie?: unknown }).mergedCookie;
+  if (typeof candidateMergedCookie === "string" && candidateMergedCookie.trim().length > 0) {
+    effectiveCookie = candidateMergedCookie;
   }
 
   try {
@@ -101,7 +113,7 @@ export async function fetchGeminiWebQuota(
       headers: {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
         "x-same-domain": "1",
-        Cookie: cookie,
+        Cookie: effectiveCookie,
         "User-Agent":
           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
       },
