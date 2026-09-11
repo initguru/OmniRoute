@@ -263,6 +263,134 @@ EUV 노광 공정에서 오버레이(Overlay) 마진은 1.2nm 이하로 유지�
       !capturedPromptSent.includes("x-anthropic-billing-header"),
       "Must not contain billing header"
     );
+    assert.ok(
+      !capturedPromptSent.includes("[시스템 지침]"),
+      "Must omit [시스템 지침] when no domain instructions provided"
+    );
+  });
+
+  it("omits [시스템 지침] on wire when system contains unheadered operational harness and memory template", async () => {
+    let capturedPromptSent = "";
+
+    const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.includes("StreamGenerate")) {
+        const bodyStr = typeof init?.body === "string" ? init.body : "";
+        const params = new URLSearchParams(bodyStr);
+        const fReq = params.get("f.req");
+        if (fReq) {
+          try {
+            const outer = JSON.parse(fReq);
+            const inner = JSON.parse(outer[1]);
+            capturedPromptSent = inner[0][0];
+          } catch {
+            capturedPromptSent = bodyStr;
+          }
+        }
+        return new Response(fixture.streamGenerateInitialResponse, {
+          status: 200,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+        });
+      }
+
+      if (url.includes("batchexecute")) {
+        return new Response(fixture.pollCompletedResponse, {
+          status: 200,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+        });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const unheaderedHarnessSystem = `
+x-anthropic-billing-header: cc-uuid-262997-8812
+You are Claude Code, Anthropic's official CLI for Claude.
+You are an interactive agent that helps users with software engineering tasks.
+
+IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, exploit development, or attacking targets without authorization.
+
+Write code that reads like the surrounding code: match its comment density, naming, and idiom.
+
+When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them unless their name or context clearly indicates otherwise.
+
+For actions that are hard to reverse or outward-facing, confirm first unless durably authorized.
+
+# Memory
+You have a persistent file-based memory at /Users/jihyun.son/.claude/projects/-Users-jihyun-son-github-OmniRoute/memory/
+
+\`\`\`markdown
+---
+name: <short-kebab-case-slug>
+description: <one-line summary, used to decide relevance during recall>
+metadata:
+  type: user | feedback | project | reference
+---
+<the fact; for feedback/project, follow with **Why:** and **How to apply:** lines. Link related memories with [[their-name]].>
+\`\`\`
+
+In the body, link to related memories with [[name]].
+user: who the user is... feedback: guidance... project:... reference:...
+After writing the file, add a one-line pointer in MEMORY.md.
+Before saving, check for an existing file that already covers it.
+
+# Context management
+When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey.
+`;
+
+    const userMessageContent = `
+<file path="semiconductor_spec.md">
+# 반도체 포토 공정 규격
+EUV 노광 공정에서 오버레이(Overlay) 마진은 1.2nm 이하로 유지되어야 합니다.
+</file>
+
+오버레이 마진 분석을 수행해줘.
+`;
+
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: {
+        messages: [
+          { role: "system", content: unheaderedHarnessSystem },
+          { role: "user", content: userMessageContent },
+        ],
+        tools: TERMINAL_TOOLS,
+        stream: false,
+      },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid",
+        providerSpecificData: {
+          atToken: "test-at",
+          fSid: "test-fsid",
+          pollIntervalMs: 5,
+        },
+      },
+      signal: AbortSignal.timeout(10000),
+      log: null,
+      fetch: mockFetch,
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+
+    // Prompt sent MUST NOT contain [시스템 지침]
+    assert.ok(
+      !capturedPromptSent.includes("[시스템 지침]"),
+      "Must not contain [시스템 지침] when only harness present"
+    );
+    assert.ok(!capturedPromptSent.includes("Assist with authorized security testing"));
+    assert.ok(!capturedPromptSent.includes("Write code that reads like the surrounding code"));
+    assert.ok(!capturedPromptSent.includes("short-kebab-case-slug"));
+    assert.ok(!capturedPromptSent.includes("When you have enough information to act, act"));
+
+    // User question and attached document must be preserved
+    assert.ok(capturedPromptSent.includes("[참조 문서 / 첨부 파일]"));
+    assert.ok(capturedPromptSent.includes("반도체 포토 공정 규격"));
+    assert.ok(capturedPromptSent.includes("[사용자 질문]"));
+    assert.ok(capturedPromptSent.includes("오버레이 마진 분석을 수행해줘."));
   });
 
   it("legacy model (gemini-3.1-pro) with tools still runs prepareToolMessages and serializes tool schemas", async () => {

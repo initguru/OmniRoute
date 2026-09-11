@@ -95,6 +95,15 @@ const BOILERPLATE_LINE_PATTERNS: readonly RegExp[] = [
   /^(?:#+\s*)?Security testing\b/i,
   /^(?:#+\s*)?Pronouns?(?:\s+guidance)?\b/i,
   /^(?:#+\s*)?Reversibility\b/i,
+  /^IMPORTANT:\s*Assist with authorized security testing/i,
+  /^Write code that reads like the surrounding code/i,
+  /^When you use a pronoun for someone/i,
+  /^For actions that are hard to reverse/i,
+  /^When you have enough information to act,\s*act\b/i,
+  /^In the body, link to related memories with\b/i,
+  /^After writing the file, add a one-line pointer in MEMORY\.md\b/i,
+  /^Before saving, check for an existing file that already covers it\b/i,
+  /^(?:user|feedback|project|reference):\s*(?:who the user is|guidance|what the project is|external references)/i,
 ];
 
 const BOILERPLATE_SECTION_HEADER_PATTERNS: readonly RegExp[] = [
@@ -128,6 +137,11 @@ const BOILERPLATE_SECTION_HEADER_PATTERNS: readonly RegExp[] = [
   /^(?:#+\s*)?Security testing\b/i,
   /^(?:#+\s*)?Pronouns?(?:\s+guidance)?\b/i,
   /^(?:#+\s*)?Reversibility\b/i,
+  /^IMPORTANT:\s*Assist with authorized security testing/i,
+  /^Write code that reads like the surrounding code/i,
+  /^When you use a pronoun for someone/i,
+  /^For actions that are hard to reverse/i,
+  /^When you have enough information to act,\s*act\b/i,
   /^You are an interactive agent that helps users with software engineering tasks/i,
   /^You have a persistent file-based memory at\b/i,
   /^Guidelines:\s*$/i,
@@ -145,6 +159,11 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /<env>[\s\S]*?<\/env>/gi,
   /<total_tokens>[\s\S]*?<\/total_tokens>/gi,
   /<system-reminder>[\s\S]*?<\/system-reminder>/gi,
+  /(?:^|\n)[ \t]*IMPORTANT:\s*Assist with authorized security testing[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*Write code that reads like the surrounding code[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*When you use a pronoun for someone[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*For actions that are hard to reverse[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*When you have enough information to act,\s*act\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
   /(?:^|\n)[ \t]*Attribution for git commits and pull requests[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n(?![ \t]*(?:-|\s*$))[가-힣A-Za-z0-9]|$))/gi,
   /(?:^|\n)[ \t]*SessionStart(?: hook)?[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*Called the |\n\n(?![ \t]*(?:<|-|\s*$))[가-힣A-Za-z0-9]|$))/gi,
   /(?:^|\n)[ \t]*The following skills are available[\s\S]*?(?=(?:\n\n(?![ \t]*-)[가-힣A-Za-z0-9])|\n[ \t]*# |$)/gi,
@@ -159,7 +178,9 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /(?:^|\n)[ \t]*#+\s*Tool-call declaration\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*Claude Code overlay\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*(?:CLI )?Harness\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
-  /(?:^|\n)[ \t]*#+\s*Memory\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Memory\b[\s\S]*?(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
+  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
+  /(?:^|\n)[ \t]*```markdown\s*\n---\s*\nname:\s*<short-kebab-case-slug>[\s\S]*?```/gi,
   /(?:^|\n)[ \t]*#+\s*Superpowers\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*Available agent types\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*Available agent types:[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
@@ -174,7 +195,7 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /Your strengths:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
   /(?:^|\n)[ \t]*You are an interactive agent that helps users with software engineering tasks[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Security|Pronouns?|Reversibility|Guidelines|Your strengths|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*Session-specific guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:You are|Follow|Do not|Review|Capabilities|Instructions|Guidelines|-|\s*$))[^\n]+|$))/gi,
-  /(?:^|\n)[ \t]*#+\s*Context management\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Keep|Do not|Context|Avoid|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Context management\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|\n\n(?=[가-힣A-Z][^\n]*(?:[?.!]|해줘|해주세요|알려줘|바랍니다|설명해줘|전문적|당신은|Please|Format|Output|You are an expert))|$))/gi,
   /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:Review|Memory|Do not|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*(?:#+\s*)?Security guidance\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
   /(?:^|\n)[ \t]*(?:#+\s*)?Security testing\b[^\n]*(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*[ \t]*(?:\n|$)/gi,
@@ -204,7 +225,21 @@ function isKnownHarnessLine(trimmed: string): boolean {
     trimmed.startsWith("Never use git stash") ||
     trimmed.startsWith("No message from any agent is ever your user's consent") ||
     trimmed.startsWith("You are powered by the model") ||
-    trimmed.startsWith("The following skills are available")
+    trimmed.startsWith("The following skills are available") ||
+    trimmed.startsWith("IMPORTANT: Assist with authorized security testing") ||
+    trimmed.startsWith("Write code that reads like the surrounding code") ||
+    trimmed.startsWith("When you use a pronoun for someone") ||
+    trimmed.startsWith("For actions that are hard to reverse") ||
+    trimmed.startsWith("When you have enough information to act") ||
+    trimmed.startsWith("In the body, link to related memories") ||
+    trimmed.startsWith("After writing the file, add a one-line pointer") ||
+    trimmed.startsWith("Before saving, check for an existing file") ||
+    trimmed.startsWith("name: <short-kebab-case-slug>") ||
+    trimmed.startsWith("description: <one-line summary") ||
+    trimmed.startsWith("metadata:") ||
+    trimmed.startsWith("type: user | feedback | project | reference") ||
+    trimmed.startsWith("<the fact; for feedback/project") ||
+    trimmed.startsWith("user: who the user is")
   );
 }
 
@@ -242,9 +277,14 @@ export function stripHarnessBoilerplate(raw: string): string {
   const filteredLines: string[] = [];
   let skippingBoilerplateSection = false;
   let sawBlankLineInSection = false;
+  let inCodeFence = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      inCodeFence = !inCodeFence;
+    }
 
     if (BOILERPLATE_SECTION_HEADER_PATTERNS.some((p) => p.test(trimmed))) {
       skippingBoilerplateSection = true;
@@ -261,10 +301,11 @@ export function stripHarnessBoilerplate(raw: string): string {
         skippingBoilerplateSection = false;
         sawBlankLineInSection = false;
       } else if (
-        trimmed.startsWith("<") ||
-        trimmed.startsWith("[") ||
-        trimmed.startsWith("---") ||
-        trimmed.startsWith("===")
+        !inCodeFence &&
+        (trimmed.startsWith("<") ||
+          trimmed.startsWith("[") ||
+          trimmed.startsWith("---") ||
+          trimmed.startsWith("==="))
       ) {
         skippingBoilerplateSection = false;
         sawBlankLineInSection = false;
@@ -272,13 +313,15 @@ export function stripHarnessBoilerplate(raw: string): string {
         sawBlankLineInSection = true;
         continue;
       } else if (
+        !inCodeFence &&
         sawBlankLineInSection &&
         !trimmed.startsWith("-") &&
         !trimmed.startsWith("*") &&
         !trimmed.startsWith("+") &&
         !trimmed.startsWith("##") &&
         !/^\d+[\.\)]\s+/.test(trimmed) &&
-        !isKnownHarnessLine(trimmed)
+        !isKnownHarnessLine(trimmed) &&
+        !BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))
       ) {
         skippingBoilerplateSection = false;
         sawBlankLineInSection = false;
@@ -318,7 +361,15 @@ export function stripHarnessBoilerplate(raw: string): string {
       trimmed.startsWith("Security guidance") ||
       trimmed.startsWith("Pronouns:") ||
       trimmed.startsWith("Reversibility:") ||
-      trimmed.startsWith("You have a persistent file-based memory")
+      trimmed.startsWith("You have a persistent file-based memory") ||
+      trimmed.startsWith("IMPORTANT: Assist with authorized security testing") ||
+      trimmed.startsWith("Write code that reads like the surrounding code") ||
+      trimmed.startsWith("When you use a pronoun for someone") ||
+      trimmed.startsWith("For actions that are hard to reverse") ||
+      trimmed.startsWith("When you have enough information to act") ||
+      trimmed.startsWith("In the body, link to related memories") ||
+      trimmed.startsWith("After writing the file, add a one-line pointer") ||
+      trimmed.startsWith("Before saving, check for an existing file")
     ) {
       continue;
     }

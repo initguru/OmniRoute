@@ -892,3 +892,167 @@ How do I configure nginx reverse proxy with websockets?`;
   assert.ok(result.prompt.includes("[사용자 질문]"));
   assert.ok(result.prompt.includes("How do I configure nginx reverse proxy with websockets?"));
 });
+
+test("Gemini Deep Think Purifier — reproduces call 1789143735663-262997: unheadered operational harness and memory template leakage is stripped and [시스템 지침] omitted", () => {
+  const systemPrompt = `
+x-anthropic-billing-header: cc-uuid-262997-8812
+You are Claude Code, Anthropic's official CLI for Claude.
+You are an interactive agent that helps users with software engineering tasks.
+
+IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, exploit development, or attacking targets without authorization.
+
+Write code that reads like the surrounding code: match its comment density, naming, and idiom.
+
+When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them unless their name or context clearly indicates otherwise.
+
+For actions that are hard to reverse or outward-facing, confirm first unless durably authorized.
+
+# Session-specific guidance
+You are currently in a multi-turn conversation.
+Follow the user's instructions carefully.
+
+Do not assume capabilities that are not exposed.
+
+# Memory
+You have a persistent file-based memory at /Users/jihyun.son/.claude/projects/-Users-jihyun-son-github-OmniRoute/memory/
+
+\`\`\`markdown
+---
+name: <short-kebab-case-slug>
+description: <one-line summary, used to decide relevance during recall>
+metadata:
+  type: user | feedback | project | reference
+---
+<the fact; for feedback/project, follow with **Why:** and **How to apply:** lines. Link related memories with [[their-name]].>
+\`\`\`
+
+In the body, link to related memories with [[name]].
+user: who the user is... feedback: guidance... project:... reference:...
+After writing the file, add a one-line pointer in MEMORY.md.
+Before saving, check for an existing file that already covers it.
+
+# Context management
+When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey.
+`;
+
+  const messages = [
+    {
+      role: "user",
+      content: "FDC 가상 계측(VM) 모델의 기본 원리를 알려줘.",
+    },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages, systemPrompt);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "FDC 가상 계측(VM) 모델의 기본 원리를 알려줘.");
+  assert.equal(result.extractedDocs.length, 0);
+
+  // [시스템 지침] must be completely omitted
+  assert.ok(!result.prompt.includes("[시스템 지침]"), "Prompt must not contain [시스템 지침]");
+  assert.ok(!result.prompt.includes("Assist with authorized security testing"));
+  assert.ok(!result.prompt.includes("Write code that reads like the surrounding code"));
+  assert.ok(!result.prompt.includes("When you use a pronoun for someone"));
+  assert.ok(!result.prompt.includes("For actions that are hard to reverse"));
+  assert.ok(!result.prompt.includes("short-kebab-case-slug"));
+  assert.ok(!result.prompt.includes("When you have enough information to act, act"));
+  assert.ok(!result.prompt.includes("persistent file-based memory"));
+
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("FDC 가상 계측(VM) 모델의 기본 원리를 알려줘."));
+});
+
+test("Gemini Deep Think Purifier — preserves genuine domain instructions when mixed with unheadered harness and memory template", () => {
+  const systemPrompt = `
+x-anthropic-billing-header: cc-uuid-262997-8812
+You are Claude Code, Anthropic's official CLI for Claude.
+
+IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, exploit development, or attacking targets without authorization.
+
+Write code that reads like the surrounding code: match its comment density, naming, and idiom.
+
+When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them unless their name or context clearly indicates otherwise.
+
+For actions that are hard to reverse or outward-facing, confirm first unless durably authorized.
+
+# Memory
+You have a persistent file-based memory at /Users/jihyun.son/.claude/projects/-Users-jihyun-son-github-OmniRoute/memory/
+
+\`\`\`markdown
+---
+name: <short-kebab-case-slug>
+description: <one-line summary, used to decide relevance during recall>
+metadata:
+  type: user | feedback | project | reference
+---
+<the fact; for feedback/project, follow with **Why:** and **How to apply:** lines. Link related memories with [[their-name]].>
+\`\`\`
+
+In the body, link to related memories with [[name]].
+user: who the user is... feedback: guidance... project:... reference:...
+After writing the file, add a one-line pointer in MEMORY.md.
+Before saving, check for an existing file that already covers it.
+
+# Context management
+When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey.
+
+당신은 반도체 결함 분석 전문가입니다.
+한국어로 핵심 결함 원인과 대책을 요약하십시오.
+`;
+
+  const messages = [
+    {
+      role: "user",
+      content: "CMP 디싱(dishing) 결함 원인을 분석해줘.",
+    },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages, systemPrompt);
+
+  assert.equal(result.hasUserContent, true);
+  assert.ok(result.prompt.includes("[시스템 지침]"));
+  assert.ok(result.prompt.includes("당신은 반도체 결함 분석 전문가입니다."));
+  assert.ok(result.prompt.includes("한국어로 핵심 결함 원인과 대책을 요약하십시오."));
+
+  assert.ok(!result.prompt.includes("Assist with authorized security testing"));
+  assert.ok(!result.prompt.includes("Write code that reads like the surrounding code"));
+  assert.ok(!result.prompt.includes("When you use a pronoun for someone"));
+  assert.ok(!result.prompt.includes("For actions that are hard to reverse"));
+  assert.ok(!result.prompt.includes("short-kebab-case-slug"));
+  assert.ok(!result.prompt.includes("When you have enough information to act, act"));
+
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("CMP 디싱(dishing) 결함 원인을 분석해줘."));
+});
+
+test("Gemini Deep Think Purifier — negative preservation: preserves user question and attached document mentioning security testing, pronouns, style, and memory templates verbatim", () => {
+  const userContent = `다음 코딩 및 보안 지침을 평가해줘:
+
+\`\`\`markdown
+# GUIDELINES.md
+IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques...
+Write code that reads like the surrounding code: match its comment density, naming, and idiom.
+When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them.
+For actions that are hard to reverse or outward-facing, confirm first unless durably authorized.
+When you have enough information to act, act. Do not re-derive facts already established in the conversation.
+\`\`\`
+
+위 지침 중 "IMPORTANT: Assist with authorized security testing" 조항과 "When you use a pronoun for someone" 조항의 실효성을 분석해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.ok(result.extractedDocs.length >= 1);
+  assert.ok(result.extractedDocs[0].includes("IMPORTANT: Assist with authorized security testing"));
+  assert.ok(result.extractedDocs[0].includes("Write code that reads like the surrounding code"));
+  assert.ok(result.extractedDocs[0].includes("When you use a pronoun for someone"));
+  assert.ok(result.extractedDocs[0].includes("For actions that are hard to reverse"));
+  assert.ok(result.extractedDocs[0].includes("When you have enough information to act, act"));
+
+  assert.ok(result.userQuestion.includes("IMPORTANT: Assist with authorized security testing"));
+  assert.ok(result.userQuestion.includes("When you use a pronoun for someone"));
+
+  assert.ok(result.prompt.includes("[참조 문서 / 첨부 파일]"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+});
