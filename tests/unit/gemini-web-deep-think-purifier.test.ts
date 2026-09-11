@@ -552,3 +552,125 @@ a.ts와 b.ts의 변수를 확인하고 합산 로직을 작성해줘.`;
   assert.ok(result.prompt.includes("[사용자 질문]"));
   assert.ok(result.prompt.includes("a.ts와 b.ts의 변수를 확인하고 합산 로직을 작성해줘."));
 });
+
+test("Gemini Deep Think Purifier — reproduces call 1789121142440-672d32: demoted system turn with Read tool truncation and superpowers is not picked as user question", () => {
+  const messages0_user = `# Delegation role definitions
+Role terms in this prompt are structural: "root/main session" means the primary conversation.
+
+# 공통 실행 통제 규칙
+## Capability와 도구 사용
+- capability는 실제 도구 목록에 노출되고 최소 1회 성공 호출됐을 때만 사용했다고 주장.
+
+# gitStatus
+Current branch: custom-main
+Status: clean
+
+Attribution for git commits and pull requests you create from here on:
+- End git commit messages with:
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+다음은 반도체 제조 공정의 FDC 데이터를 기반으로 VM(Virtual Metrology)의 성능 개선을 위한 프로젝트의 아키텍쳐이다. 아키텍쳐의 완성도를 평가해줘.
+---
+@ARCHITECTURE.md`;
+
+  const messages1_demoted_system = `SessionStart hook additional context: <EXTREMELY_IMPORTANT> You have superpowers: brainstorming, subagent-driven-development. Follow SDD boundaries strictly. </EXTREMELY_IMPORTANT>
+
+Called the Read tool with the following input: {"file_path":"/Users/jihyun.son/github/OmniRoute/ARCHITECTURE.md"}
+Result of calling the Read tool:
+     1\t# Virtual Metrology Architecture
+     2\t
+     3\t## 1. Overview
+     4\tVirtual Metrology (VM) models semiconductor process results.
+     5\t
+[...truncated 5217 chars...]
+   150\t## 5. Performance Evaluation & Validation
+   151\tThe system evaluates RMSE, MAPE, and R2 scores for wafer thickness predictions.
+   152\tReal-time inference latency is bounded at 20ms per wafer.
+
+The following skills are available for use with the Skill tool:
+- superpowers:brainstorming
+- superpowers:subagent-driven-development
+
+Then announce "Using superpowers:brainstorming to evaluate the architecture completeness."
+gitStatus: clean
+<total_tokens>15000000 tokens left</total_tokens>`;
+
+  const messages = [
+    { role: "user", content: messages0_user },
+    { role: "user", content: messages1_demoted_system },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+
+  // Real user question from messages[0] must be picked, NOT the demoted turn residual
+  assert.equal(
+    result.userQuestion,
+    `다음은 반도체 제조 공정의 FDC 데이터를 기반으로 VM(Virtual Metrology)의 성능 개선을 위한 프로젝트의 아키텍쳐이다. 아키텍쳐의 완성도를 평가해줘.
+---
+@ARCHITECTURE.md`
+  );
+  assert.ok(!result.userQuestion.includes("superpowers"));
+  assert.ok(!result.userQuestion.includes("brainstorming"));
+  assert.ok(!result.userQuestion.includes("Then announce"));
+
+  // Full document must be extracted across the truncation marker
+  assert.equal(result.extractedDocs.length, 1);
+  assert.ok(result.extractedDocs[0].startsWith("[참조 문서: ARCHITECTURE.md]"));
+  assert.ok(
+    result.extractedDocs[0].includes("Virtual Metrology (VM) models semiconductor process results.")
+  );
+  assert.ok(result.extractedDocs[0].includes("[...truncated 5217 chars...]"));
+  assert.ok(
+    result.extractedDocs[0].includes(
+      "The system evaluates RMSE, MAPE, and R2 scores for wafer thickness predictions."
+    )
+  );
+  assert.ok(
+    result.extractedDocs[0].includes("Real-time inference latency is bounded at 20ms per wafer.")
+  );
+  assert.ok(!result.extractedDocs[0].includes("150\t"));
+
+  // Prompt structure verification
+  assert.ok(result.prompt.includes("[참조 문서 / 첨부 파일]"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("다음은 반도체 제조 공정의 FDC 데이터를 기반으로 VM"));
+  assert.ok(!result.prompt.includes("Using superpowers:brainstorming"));
+  assert.ok(!result.prompt.includes("Then announce"));
+
+  // Real question must NOT be relegated to prior turns
+  if (result.prompt.includes("[이전 대화]")) {
+    assert.ok(
+      !result.prompt
+        .split("[이전 대화]")[1]
+        .split("[사용자 질문]")[0]
+        .includes("아키텍쳐의 완성도를 평가해줘.")
+    );
+  }
+});
+
+test("Gemini Deep Think Purifier — preserves numbers in document content while stripping cat -n prefixes", () => {
+  const userContent = `Called the Read tool with the following input: {"file_path":"docs/spec.md"}
+Result of calling the Read tool:
+     1\t# Spec 2026
+     2\t1. Introduction: Year 2024 to 2026
+     3\t| 1 | Table entry 100 |
+     4\t[...truncated 1000 chars...]
+     5\tPrice is $500 for 2 items.
+
+스펙 문서를 요약해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "스펙 문서를 요약해줘.");
+  assert.equal(result.extractedDocs.length, 1);
+  const doc = result.extractedDocs[0];
+  assert.ok(doc.includes("# Spec 2026"));
+  assert.ok(doc.includes("1. Introduction: Year 2024 to 2026"));
+  assert.ok(doc.includes("| 1 | Table entry 100 |"));
+  assert.ok(doc.includes("[...truncated 1000 chars...]"));
+  assert.ok(doc.includes("Price is $500 for 2 items."));
+});
