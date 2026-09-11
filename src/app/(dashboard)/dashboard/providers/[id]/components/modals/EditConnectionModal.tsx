@@ -92,6 +92,30 @@ export interface EditConnectionModalProps {
   onClose: () => void;
 }
 const stringField = (value: unknown) => (typeof value === "string" ? value : "");
+
+export function isMaskedCredential(value?: string | null): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  return (
+    trimmed.includes("****") ||
+    trimmed.includes("***") ||
+    trimmed.includes("...") ||
+    trimmed.includes("…")
+  );
+}
+
+export function isDraftCredentialDirty(draft?: string | null, saved?: string | null): boolean {
+  const trimmedDraft = (draft || "").trim();
+  if (!trimmedDraft) return false;
+  if (trimmedDraft === (saved || "").trim()) return false;
+  return true;
+}
+
+export function shouldTestDraftCredential(draft?: string | null, saved?: string | null): boolean {
+  if (!isDraftCredentialDirty(draft, saved)) return false;
+  if (isMaskedCredential(draft)) return false;
+  return true;
+}
 export default function EditConnectionModal({
   isOpen,
   connection,
@@ -167,7 +191,11 @@ export default function EditConnectionModal({
     peakHourProtection: { ...EMPTY_PEAK_HOUR_PROTECTION, windows: [] } as PeakHourProtectionConfig,
   });
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null);
+  const [testResult, setTestResult] = useState<{
+    valid: boolean;
+    diagnosis: { type?: string; [key: string]: unknown } | null;
+    message: string | null;
+  } | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [validatedProviderSpecificData, setValidatedProviderSpecificData] = useState<
@@ -456,24 +484,101 @@ export default function EditConnectionModal({
   } else if (initializedFor !== null) {
     setInitializedFor(null);
   }
+  const buildValidationPayload = () => ({
+    provider,
+    apiKey: formData.apiKey,
+    validationModelId: formData.validationModelId || undefined,
+    customUserAgent: formData.customUserAgent.trim() || undefined,
+    baseUrl: formData.baseUrl.trim() || undefined,
+    region: isAwsPolly
+      ? formData.region.trim() || "us-east-1"
+      : showsRegion
+        ? formData.region.trim() || defaultRegion
+        : undefined,
+    accessKeyId: isAwsPolly ? formData.awsAccessKeyId.trim() || undefined : undefined,
+    sessionToken: isAwsPolly ? formData.awsSessionToken.trim() || undefined : undefined,
+    cx: formData.cx.trim() || undefined,
+    runtimeKey: isChatGptWebCodex ? formData.runtimeKey.trim() || undefined : undefined,
+    tunnelId: isChatGptWebCodex ? formData.tunnelId.trim() || undefined : undefined,
+    connectorName: isChatGptWebCodex ? formData.connectorName.trim() || undefined : undefined,
+  });
   const handleTest = async () => {
     if (!provider) return;
     setTesting(true);
     setTestResult(null);
+
+    const shouldValidateDraft = shouldTestDraftCredential(formData.apiKey, connection?.apiKey);
+
     try {
-      const res = await fetch(`/api/providers/${connection.id}/test`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          validationModelId: formData.validationModelId || undefined,
-        }),
-      });
-      const data = await res.json();
-      setTestResult({
-        valid: !!data.valid,
-        diagnosis: data.diagnosis || null,
-        message: data.error || null,
-      });
+      if (shouldValidateDraft) {
+        const res = await fetch("/api/providers/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildValidationPayload()),
+        });
+        const data = await res.json().catch(() => ({}));
+        const isValid = Boolean(res.ok && data.valid);
+        const rawError =
+          typeof data.error === "string"
+            ? data.error
+            : data.error?.message || (isValid ? null : t("failedTestConnection"));
+
+        let diagnosis = data.diagnosis || null;
+        if (!diagnosis && !isValid) {
+          if (data.unsupported) {
+            diagnosis = { type: "unsupported" };
+          } else if (
+            res.status === 401 ||
+            res.status === 403 ||
+            /invalid|unauthorized|forbidden|auth/i.test(rawError || "")
+          ) {
+            diagnosis = { type: "upstream_auth_error" };
+          } else if (
+            res.status === 429 ||
+            /rate|quota|too many/i.test(rawError || "") ||
+            /credit/i.test(rawError || "")
+          ) {
+            diagnosis = { type: "upstream_rate_limited" };
+          } else if (res.status >= 500) {
+            diagnosis = { type: "upstream_unavailable" };
+          } else {
+            diagnosis = { type: "upstream_error" };
+          }
+        }
+
+        setTestResult({
+          valid: isValid,
+          diagnosis,
+          message: rawError || null,
+        });
+        setValidationResult(isValid ? "success" : "failed");
+        if (isValid && data.providerSpecificData && typeof data.providerSpecificData === "object") {
+          setValidatedProviderSpecificData(data.providerSpecificData);
+        }
+      } else {
+        if (!connection?.id) {
+          setTestResult({
+            valid: false,
+            diagnosis: { type: "auth_missing" },
+            message: t("failedTestConnection"),
+          });
+          return;
+        }
+
+        const res = await fetch(`/api/providers/${connection.id}/test`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            validationModelId: formData.validationModelId || undefined,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        setTestResult({
+          valid: !!data.valid,
+          diagnosis: data.diagnosis || null,
+          message: data.error || null,
+        });
+      }
     } catch {
       setTestResult({
         valid: false,
@@ -499,26 +604,9 @@ export default function EditConnectionModal({
       const res = await fetch("/api/providers/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider,
-          apiKey: formData.apiKey,
-          validationModelId: formData.validationModelId || undefined,
-          customUserAgent: formData.customUserAgent.trim() || undefined,
-          baseUrl: formData.baseUrl.trim() || undefined,
-          region: isAwsPolly
-            ? formData.region.trim() || "us-east-1"
-            : showsRegion
-              ? formData.region.trim() || defaultRegion
-              : undefined,
-          accessKeyId: isAwsPolly ? formData.awsAccessKeyId.trim() || undefined : undefined,
-          sessionToken: isAwsPolly ? formData.awsSessionToken.trim() || undefined : undefined,
-          cx: formData.cx.trim() || undefined,
-          runtimeKey: isChatGptWebCodex ? formData.runtimeKey.trim() || undefined : undefined,
-          tunnelId: isChatGptWebCodex ? formData.tunnelId.trim() || undefined : undefined,
-          connectorName: isChatGptWebCodex ? formData.connectorName.trim() || undefined : undefined,
-        }),
+        body: JSON.stringify(buildValidationPayload()),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       setValidationResult(data.valid ? "success" : "failed");
       if (
         data.valid &&
@@ -609,26 +697,7 @@ export default function EditConnectionModal({
             const res = await fetch("/api/providers/validate", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                provider,
-                apiKey: formData.apiKey,
-                validationModelId: formData.validationModelId || undefined,
-                customUserAgent: formData.customUserAgent.trim() || undefined,
-                baseUrl: formData.baseUrl.trim() || undefined,
-                region: isAwsPolly
-                  ? formData.region.trim() || "us-east-1"
-                  : showsRegion
-                    ? formData.region.trim() || defaultRegion
-                    : undefined,
-                accessKeyId: isAwsPolly ? formData.awsAccessKeyId.trim() || undefined : undefined,
-                sessionToken: isAwsPolly ? formData.awsSessionToken.trim() || undefined : undefined,
-                cx: formData.cx.trim() || undefined,
-                runtimeKey: isChatGptWebCodex ? formData.runtimeKey.trim() || undefined : undefined,
-                tunnelId: isChatGptWebCodex ? formData.tunnelId.trim() || undefined : undefined,
-                connectorName: isChatGptWebCodex
-                  ? formData.connectorName.trim() || undefined
-                  : undefined,
-              }),
+              body: JSON.stringify(buildValidationPayload()),
             });
             const data = await res.json();
             isValid = !!data.valid;
@@ -1606,6 +1675,14 @@ export default function EditConnectionModal({
                 </Badge>
                 {testErrorMeta && (
                   <Badge variant={testErrorMeta.variant}>{t(testErrorMeta.labelKey)}</Badge>
+                )}
+                {!testResult.valid && testResult.message && (
+                  <span
+                    className="text-xs text-red-400 truncate max-w-xs"
+                    title={testResult.message}
+                  >
+                    {testResult.message}
+                  </span>
                 )}
               </>
             )}
