@@ -253,6 +253,318 @@ export async function runAntigravityLogin(opts = {}, deps = {}) {
   return blob;
 }
 
+const GEMINI_LOGIN_URL = "https://gemini.google.com/app";
+const GEMINI_COOKIE_NAMES = ["__Secure-1PSID", "__Secure-1PSIDTS", "__Secure-1PSIDCC"];
+
+/**
+ * Format an array or dictionary of cookies into the Gemini Web apiKey string.
+ */
+export function formatGeminiWebCookieString(cookies) {
+  const map = new Map();
+  if (Array.isArray(cookies)) {
+    for (const c of cookies) {
+      if (c && c.name && c.value) {
+        map.set(c.name, String(c.value).trim());
+      }
+    }
+  } else if (cookies && typeof cookies === "object") {
+    for (const [key, val] of Object.entries(cookies)) {
+      if (typeof val === "string" && val.trim()) {
+        map.set(key, val.trim());
+      }
+    }
+  }
+
+  const parts = [];
+  for (const name of GEMINI_COOKIE_NAMES) {
+    const val = map.get(name);
+    if (val) {
+      parts.push(`${name}=${val}`);
+    }
+  }
+  return parts.join("; ");
+}
+
+/**
+ * Extract __Secure-1PSID, __Secure-1PSIDTS, __Secure-1PSIDCC from cookies.
+ */
+export function extractGeminiWebCookies(cookies) {
+  if (!cookies) return null;
+
+  if (!Array.isArray(cookies)) {
+    if (typeof cookies === "object") {
+      const psid = cookies["__Secure-1PSID"] || null;
+      if (!psid) return null;
+      return {
+        psid,
+        psidts: cookies["__Secure-1PSIDTS"] || null,
+        psidcc: cookies["__Secure-1PSIDCC"] || null,
+        formatted: formatGeminiWebCookieString(cookies),
+      };
+    }
+    return null;
+  }
+
+  const findCookie = (name) =>
+    cookies.find(
+      (c) =>
+        c.name === name &&
+        (!c.domain || c.domain === "google.com" || c.domain.endsWith(".google.com"))
+    );
+
+  const psidCookie = findCookie("__Secure-1PSID");
+  if (!psidCookie?.value) return null;
+
+  const psid = psidCookie.value.trim();
+  const psidts = findCookie("__Secure-1PSIDTS")?.value?.trim() || null;
+  const psidcc = findCookie("__Secure-1PSIDCC")?.value?.trim() || null;
+
+  const formatted = formatGeminiWebCookieString([
+    { name: "__Secure-1PSID", value: psid },
+    ...(psidts ? [{ name: "__Secure-1PSIDTS", value: psidts }] : []),
+    ...(psidcc ? [{ name: "__Secure-1PSIDCC", value: psidcc }] : []),
+  ]);
+
+  return {
+    psid,
+    psidts,
+    psidcc,
+    formatted,
+  };
+}
+
+/**
+ * Persist Gemini Web apiKey to the local OmniRoute store (API if server is up, else SQLite).
+ */
+export async function saveGeminiWebCredential(apiKey, deps = {}) {
+  const provider = "gemini-web";
+
+  // 1. Try API if server is running
+  const isServerUpImpl = deps.isServerUp ?? (await import("../api.mjs")).isServerUp;
+  const apiFetchImpl = deps.apiFetch ?? (await import("../api.mjs")).apiFetch;
+
+  try {
+    if (await isServerUpImpl()) {
+      const res = await apiFetchImpl("/api/v1/providers/keys", {
+        method: "POST",
+        body: { provider, apiKey },
+        retry: false,
+        acceptNotOk: true,
+      });
+      if (res && res.ok) {
+        return { success: true, via: "api" };
+      }
+    }
+  } catch {
+    // fall through to local SQLite
+  }
+
+  // 2. Direct SQLite storage
+  try {
+    const openDb = deps.openOmniRouteDb ?? (await import("../sqlite.mjs")).openOmniRouteDb;
+    const listConnections =
+      deps.listProviderConnections ??
+      (await import("../provider-store.mjs")).listProviderConnections;
+    const upsertConnection =
+      deps.upsertApiKeyProviderConnection ??
+      (await import("../provider-store.mjs")).upsertApiKeyProviderConnection;
+
+    const { db } = await openDb();
+    try {
+      const existing = listConnections(db).find(
+        (c) => c.provider === provider && c.authType === "apikey"
+      );
+      upsertConnection(db, {
+        provider,
+        name: existing?.name || provider,
+        apiKey,
+      });
+      return { success: true, via: "db" };
+    } finally {
+      if (db && typeof db.close === "function") {
+        db.close();
+      }
+    }
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * Parse cookies and save to provider store.
+ */
+export async function parseAndSaveGeminiWebCookies(cookies, deps = {}) {
+  let formatted = "";
+  if (typeof cookies === "string" && cookies.includes("=")) {
+    formatted = cookies;
+  } else {
+    const extracted = extractGeminiWebCookies(cookies);
+    if (!extracted) {
+      return { success: false, error: "Missing required __Secure-1PSID cookie" };
+    }
+    formatted = extracted.formatted;
+  }
+
+  const saveFn = deps.saveCredential ?? saveGeminiWebCredential;
+  const saveResult = await saveFn(formatted, deps);
+  return {
+    success: saveResult?.success ?? false,
+    apiKey: formatted,
+    ...saveResult,
+  };
+}
+
+async function defaultLaunchGeminiBrowser(options = {}) {
+  const { default: playwright } = await import("playwright");
+  const headless = options.headless ?? false;
+  const configuredPath = process.env.OMNIROUTE_LOGIN_BROWSER_PATH?.trim();
+  const attempts = [
+    ...(configuredPath ? [{ headless, executablePath: configuredPath }] : []),
+    { headless, channel: "chrome" },
+    { headless, channel: "msedge" },
+    { headless },
+  ];
+
+  let lastError;
+  for (const launchOpts of attempts) {
+    try {
+      return await playwright.chromium.launch(launchOpts);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("No compatible Chromium browser is available for sign-in");
+}
+
+/**
+ * Launch interactive browser, wait for login at gemini.google.com/app,
+ * extract __Secure-1PSID* cookies, format and persist to local store.
+ */
+export async function runGeminiWebLogin(opts = {}, deps = {}) {
+  const log = deps.log ?? ((s) => process.stderr.write(s));
+  const print = deps.print ?? ((s) => process.stdout.write(s));
+  const timeout = opts.timeout ?? 300000;
+  const headless = Boolean(opts.headless);
+  const pollIntervalMs = deps.pollIntervalMs ?? 1000;
+
+  log("\nGoogle 계정 로그인을 완료해 주세요...\n");
+  log(`브라우저가 열립니다: ${GEMINI_LOGIN_URL}\n`);
+
+  let browser = deps.browser;
+  if (!browser) {
+    const launchBrowser = deps.launchBrowser ?? defaultLaunchGeminiBrowser;
+    browser = await launchBrowser({ headless });
+  }
+
+  try {
+    const context =
+      deps.context ??
+      (browser.newContext
+        ? await browser.newContext({
+            viewport: { width: 1280, height: 800 },
+            locale: "en-US",
+          })
+        : null);
+
+    const page = deps.page ?? (context?.newPage ? await context.newPage() : null);
+
+    if (page?.goto) {
+      await page
+        .goto(GEMINI_LOGIN_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: Math.min(timeout, 60000),
+        })
+        .catch(() => {});
+    }
+
+    const deadline = Date.now() + timeout;
+    let extracted = null;
+
+    while (Date.now() < deadline) {
+      let cookies = [];
+      if (context?.cookies) {
+        cookies = await context
+          .cookies([".google.com", "https://gemini.google.com", "https://google.com"])
+          .catch(() => []);
+      }
+
+      const candidate = extractGeminiWebCookies(cookies);
+      if (candidate) {
+        let ready = false;
+        try {
+          const currentUrl = page?.url ? page.url() : "";
+          if (currentUrl && currentUrl.includes("gemini.google.com/app")) {
+            ready = true;
+          }
+          if (!ready && page?.locator) {
+            const editorCount = await page
+              .locator(".ql-editor")
+              .count()
+              .catch(() => 0);
+            if (editorCount > 0) ready = true;
+          }
+        } catch {
+          // page may still be navigating
+        }
+
+        if (ready) {
+          extracted = candidate;
+          break;
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    if (!extracted) {
+      throw new Error("Timed out waiting for Gemini Web login or missing __Secure-1PSID cookie");
+    }
+
+    const formattedApiKey = extracted.formatted;
+    const saveFn = deps.saveCredential ?? saveGeminiWebCredential;
+    const saveResult = await saveFn(formattedApiKey, deps);
+
+    if (saveResult?.success) {
+      log("\n[Gemini Web] 로그인 완료 및 세션 쿠키가 저장되었습니다.\n");
+    } else {
+      print(
+        "\n[Gemini Web] 세션 쿠키 추출 완료:\n\n" +
+          formattedApiKey +
+          "\n\n(로컬 저장소에 저장하지 못했습니다. 위 쿠키를 대시보드 또는 CLI로 등록하세요.)\n"
+      );
+    }
+
+    return {
+      success: true,
+      apiKey: formattedApiKey,
+      extracted,
+      saveResult,
+    };
+  } finally {
+    if (browser && typeof browser.close === "function") {
+      try {
+        await browser.close();
+      } catch {
+        // ignore close errors
+      }
+    }
+  }
+}
+
+async function runLoginGeminiWeb(opts) {
+  try {
+    await runGeminiWebLogin({
+      headless: opts.headless,
+      timeout: opts.timeout,
+    });
+  } catch (err) {
+    process.stderr.write(`\nGemini Web login failed: ${err?.message || err}\n`);
+    process.exit(1);
+  }
+}
+
 async function runLoginAntigravity(opts) {
   try {
     await runAntigravityLogin({
@@ -271,7 +583,7 @@ async function runLoginAntigravity(opts) {
 export function registerLogin(program) {
   const login = program
     .command("login")
-    .description("Local OAuth helpers for remote OmniRoute installs (run on your own machine)");
+    .description("Local OAuth and web-session helpers for OmniRoute");
 
   login
     .command("antigravity")
@@ -286,4 +598,12 @@ export function registerLogin(program) {
     .option("--no-push", "Always print the blob, never contact the server")
     .option("--context <name>", "Push to this context instead of the active one")
     .action(runLoginAntigravity);
+
+  login
+    .command("gemini-web")
+    .alias("gemini")
+    .description("Log in to Gemini Web via browser and save session cookies")
+    .option("--headless", "Run browser in headless mode")
+    .option("--timeout <ms>", "How long to wait for login (ms)", (v) => parseInt(v, 10), 300000)
+    .action(runLoginGeminiWeb);
 }

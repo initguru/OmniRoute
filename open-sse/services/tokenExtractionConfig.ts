@@ -113,8 +113,9 @@ const RAW_CONFIGS: TokenExtractionConfig[] = [
     [
       { type: "cookie", name: "__Secure-1PSID", domain: ".google.com" },
       { type: "cookie", name: "__Secure-1PSIDTS", domain: ".google.com" },
+      { type: "cookie", name: "__Secure-1PSIDCC", domain: ".google.com" },
     ],
-    "Log in to your Google account at gemini.google.com. Both __Secure-1PSID and __Secure-1PSIDTS cookies will be extracted.",
+    "Log in to your Google account at gemini.google.com. __Secure-1PSID, __Secure-1PSIDTS, and __Secure-1PSIDCC cookies will be extracted.",
     { cookieDomain: ".google.com" }
   ),
 
@@ -396,3 +397,46 @@ export function listExtractionConfigs(): TokenExtractionConfig[] {
 
 /** The shared config map — used by LoginManager and InAppLoginService */
 export const TOKEN_EXTRACTION_CONFIGS = CONFIG_MAP;
+
+export const GEMINI_WEB_COOKIE_NAMES = [
+  "__Secure-1PSID",
+  "__Secure-1PSIDTS",
+  "__Secure-1PSIDCC",
+] as const;
+
+/**
+ * Format extracted Gemini Web cookies into the canonical semicolon-separated apiKey string.
+ * Accepts an array of { name, value } cookie objects, or a Record<name, value>.
+ * Preserves the canonical ordering: __Secure-1PSID, __Secure-1PSIDTS, __Secure-1PSIDCC.
+ */
+export function formatGeminiWebCookies(
+  cookies:
+    Array<{ name: string; value: string; domain?: string }> | Record<string, string | undefined>
+): string {
+  const map = new Map<string, string>();
+  if (Array.isArray(cookies)) {
+    for (const c of cookies) {
+      if (c && typeof c.name === "string" && typeof c.value === "string" && c.value.trim()) {
+        map.set(c.name, c.value.trim());
+      }
+    }
+  } else if (cookies && typeof cookies === "object") {
+    for (const [key, val] of Object.entries(cookies)) {
+      if (typeof val === "string" && val.trim()) {
+        map.set(key, val.trim());
+      }
+    }
+  }
+
+  const parts: string[] = [];
+  for (const name of GEMINI_WEB_COOKIE_NAMES) {
+    const val = map.get(name);
+    if (val) {
+      parts.push(`${name}=${val}`);
+    }
+  }
+  return parts.join("; ");
+}
+
+/** Generic alias for cookie formatting */
+export const formatExtractedCookies = formatGeminiWebCookies;
