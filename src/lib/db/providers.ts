@@ -934,7 +934,11 @@ function _updateConnectionRow(db: DbLike, id: string, data: JsonRecord) {
   ).run(_buildUpdateConnectionRowParams(id, data, now));
 }
 
-export async function updateProviderConnection(id: string, data: JsonRecord) {
+export async function updateProviderConnection(
+  id: string,
+  data: JsonRecord,
+  options?: { expectedApiKey?: string }
+) {
   const db = getDbInstance() as unknown as DbLike;
   const existing = db.prepare("SELECT * FROM provider_connections WHERE id = ?").get(id);
   if (!existing) return null;
@@ -945,10 +949,20 @@ export async function updateProviderConnection(id: string, data: JsonRecord) {
   // on every unrelated field edit.
   await assertApiKeyIsNotManagementPassword(data.apiKey);
 
-  const existingCamel = toRecord(rowToCamel(existing));
+  const rawExisting = toRecord(rowToCamel(existing));
+  const existingCamel = decryptConnectionFields({ ...rawExisting }) as JsonRecord;
+
+  // CAS: Optimistic Concurrency Control for rotating credentials.
+  // If expectedApiKey is specified, abort update if the stored apiKey was modified concurrently.
+  const expectedApiKey = options?.expectedApiKey ?? (data.expectedApiKey as string | undefined);
+  if (expectedApiKey !== undefined && existingCamel.apiKey !== expectedApiKey) {
+    return null;
+  }
+
+  const { expectedApiKey: _exp, ...cleanData } = data;
   const merged: JsonRecord = {
     ...existingCamel,
-    ...data,
+    ...cleanData,
     updatedAt: new Date().toISOString(),
   };
   merged.providerSpecificData = normalizeConnectionProviderSpecificData(
@@ -1019,6 +1033,19 @@ export async function updateProviderConnection(id: string, data: JsonRecord) {
   }
 
   return returnedConnection;
+}
+
+/**
+ * Update provider connection with Compare-And-Swap (CAS) on apiKey to prevent
+ * clobbering newly saved user credentials with stale rotated cookies.
+ */
+export async function updateProviderConnectionCas(
+  id: string,
+  data: JsonRecord,
+  expectedApiKey?: string
+): Promise<{ updated: boolean; connection: JsonRecord | null }> {
+  const updated = await updateProviderConnection(id, data, { expectedApiKey });
+  return { updated: Boolean(updated), connection: updated };
 }
 
 export {

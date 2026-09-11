@@ -36,10 +36,10 @@ import {
   type GeminiWebSessionTokens,
 } from "./gemini-web/directProtocol.ts";
 import { parseCookies, mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
-import { recoverGeminiWebSessionWithBrowser } from "./gemini-web/sessionRecovery.ts";
 
 export { mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
 export { recoverGeminiWebSessionWithBrowser } from "./gemini-web/sessionRecovery.ts";
+export { GeminiWebAuthRequiredError } from "./gemini-web/directProtocol.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -516,7 +516,12 @@ export class GeminiWebExecutor extends BaseExecutor {
       const jarCookies = setCookies.flatMap((header: string) => parseCookies(header));
       const mergedCookie = mergeRotatedGeminiCookies(cookie, jarCookies);
       if (mergedCookie && mergedCookie !== cookie) {
-        await onCredentialsRefreshed({ ...credentials, apiKey: mergedCookie });
+        await onCredentialsRefreshed({
+          ...credentials,
+          apiKey: mergedCookie,
+          expectedApiKey: cookie,
+          previousApiKey: cookie,
+        });
       }
     } catch (err) {
       log?.warn?.(
@@ -643,6 +648,8 @@ export class GeminiWebExecutor extends BaseExecutor {
               await onCredentialsRefreshed?.({
                 ...credentials,
                 apiKey: bootstrapResult.mergedCookie,
+                expectedApiKey: oldCookie,
+                previousApiKey: oldCookie,
               });
             } catch (err) {
               log?.warn?.(
@@ -657,56 +664,24 @@ export class GeminiWebExecutor extends BaseExecutor {
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          log?.warn?.(
-            "GEMINI-WEB",
-            `Direct bootstrap failed: ${msg}. Attempting Tier 2 browser self-healing recovery...`
-          );
-          const recovery = await recoverGeminiWebSessionWithBrowser({
-            cookie,
-            credentials: credentials as Record<string, unknown> | undefined,
-            onCredentialsRefreshed,
-            log: log ?? undefined,
-            signal: signal ?? undefined,
-            timeoutMs: Math.min(timeoutMs, 25000),
-            playwright: (input as { playwright?: unknown }).playwright,
-          });
-          if (recovery.success && recovery.tokens) {
-            sessionTokens = recovery.tokens;
-            if (recovery.mergedCookie && recovery.mergedCookie !== cookie) {
-              const oldCookie = cookie;
-              cookie = recovery.mergedCookie;
-              setCachedSession(cookie, sessionTokens);
-              setCachedSession(oldCookie, sessionTokens);
-            } else {
-              setCachedSession(cookie, sessionTokens);
-            }
-            log?.info?.(
-              "GEMINI-WEB",
-              "Tier 2 browser self-healing recovery succeeded; proceeding with Direct API request."
-            );
-          } else {
-            log?.warn?.(
-              "GEMINI-WEB",
-              `Tier 2 browser self-healing recovery failed: ${recovery.error || "unknown"}`
-            );
-            return {
-              response: new Response(
-                JSON.stringify(
-                  buildErrorBody(401, sanitizeErrorMessage(msg), null, {
-                    type: "authentication_error",
-                    code: "gemini_web_auth_required",
-                  })
-                ),
-                {
-                  status: 401,
-                  headers: { "Content-Type": "application/json" },
-                }
+          log?.warn?.("GEMINI-WEB", `Direct bootstrap failed: ${sanitizeErrorMessage(msg)}`);
+          return {
+            response: new Response(
+              JSON.stringify(
+                buildErrorBody(401, sanitizeErrorMessage(msg), null, {
+                  type: "authentication_error",
+                  code: "gemini_web_auth_required",
+                })
               ),
-              url: GEMINI_URL,
-              headers: {},
-              transformedBody: body,
-            };
-          }
+              {
+                status: 401,
+                headers: { "Content-Type": "application/json" },
+              }
+            ),
+            url: GEMINI_URL,
+            headers: {},
+            transformedBody: body,
+          };
         }
       }
 

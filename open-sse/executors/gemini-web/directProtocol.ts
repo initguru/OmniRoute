@@ -13,6 +13,18 @@ import { parseCookies, mergeRotatedGeminiCookies } from "./cookieUtils.ts";
 
 export const GEMINI_DEEP_THINK_MODEL_ID = "797f3d0293f288ad";
 
+export class GeminiWebAuthRequiredError extends Error {
+  public readonly statusCode: number;
+  public readonly code: string;
+
+  constructor(message: string, statusCode = 401) {
+    super(message);
+    this.name = "GeminiWebAuthRequiredError";
+    this.statusCode = statusCode;
+    this.code = "gemini_web_auth_required";
+  }
+}
+
 export interface GeminiWebSessionTokens {
   atToken: string;
   fSid: string;
@@ -549,6 +561,12 @@ export async function bootstrapGeminiWebSession(
     });
 
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        throw new GeminiWebAuthRequiredError(
+          `Failed to fetch Gemini Web session: HTTP ${res.status}. Cookie may be expired or invalid.`,
+          401
+        );
+      }
       throw new Error(`Failed to fetch Gemini Web session: HTTP ${res.status}`);
     }
 
@@ -584,7 +602,7 @@ export async function bootstrapGeminiWebSession(
     locationHeader.includes("accounts.google.com") ||
     locationHeader.includes("ServiceLogin")
   ) {
-    throw new Error(
+    throw new GeminiWebAuthRequiredError(
       "Failed to extract Gemini Web session tokens: redirected to login. Cookie may be expired or invalid."
     );
   }
@@ -596,7 +614,7 @@ export async function bootstrapGeminiWebSession(
     html.match(/"cfb2h":\s*"([^"]+)"/)?.[1] || html.match(/"cfb2h",\s*"([^"]+)"/)?.[1];
 
   if (!atToken || !fSid || !buildLabel) {
-    throw new Error(
+    throw new GeminiWebAuthRequiredError(
       "Failed to extract Gemini Web session tokens (SNlM0e/FdrFJe/cfb2h). Cookie may be expired or invalid."
     );
   }

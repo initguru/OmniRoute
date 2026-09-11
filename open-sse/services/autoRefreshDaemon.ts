@@ -30,7 +30,7 @@ interface StoredCredentialEntry {
   providerId: string;
   value: string;
   storedAt: number;
-  onRefreshed?: (newValue: string) => Promise<void> | void;
+  onRefreshed?: (newValue: string, previousValue?: string) => Promise<void> | void;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ export class AutoRefreshDaemon {
   registerCredential(
     providerId: string,
     value: string,
-    onRefreshed?: (newValue: string) => Promise<void> | void
+    onRefreshed?: (newValue: string, previousValue?: string) => Promise<void> | void
   ): void {
     this.credentialStore.set(providerId, {
       providerId,
@@ -279,11 +279,12 @@ export class AutoRefreshDaemon {
           if (jarCookies.length > 0) {
             const updatedCookie = mergeRotatedGeminiCookies(entry.value, jarCookies);
             if (updatedCookie !== entry.value) {
+              const previousValue = entry.value;
               entry.value = updatedCookie;
               entry.storedAt = Date.now();
               if (entry.onRefreshed) {
                 try {
-                  await entry.onRefreshed(updatedCookie);
+                  await entry.onRefreshed(updatedCookie, previousValue);
                 } catch (callbackErr) {
                   console.warn(
                     `[AutoRefreshDaemon] onRefreshed callback failed for "${providerId}":`,

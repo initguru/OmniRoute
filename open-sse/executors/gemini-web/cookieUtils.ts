@@ -18,7 +18,8 @@ export const GEMINI_ROTATABLE_COOKIE_NAMES = [
  * into an array of { name, value } pairs, ignoring standard cookie attributes.
  */
 export function parseCookies(raw: string): Array<ParsedCookie> {
-  return raw
+  const cleaned = raw.replace(/^cookie:\s*/i, "").trim();
+  return cleaned
     .split(";")
     .map((part) => part.trim())
     .filter(Boolean)
@@ -58,20 +59,25 @@ export function mergeRotatedGeminiCookies(
 
   const pairs = parseCookies(originalCookie);
   const seen = new Set<string>();
-  const merged = pairs.map(({ name, value }) => {
+  const merged: Array<ParsedCookie> = [];
+
+  for (const { name, value } of pairs) {
+    if (seen.has(name)) continue;
     seen.add(name);
     if (
       (GEMINI_ROTATABLE_COOKIE_NAMES as readonly string[]).includes(name) &&
       jarByName.has(name)
     ) {
-      return { name, value: jarByName.get(name) as string };
+      merged.push({ name, value: jarByName.get(name) as string });
+    } else {
+      merged.push({ name, value });
     }
-    return { name, value };
-  });
+  }
 
   for (const name of GEMINI_ROTATABLE_COOKIE_NAMES) {
     if (!seen.has(name) && jarByName.has(name)) {
       merged.push({ name, value: jarByName.get(name) as string });
+      seen.add(name);
     }
   }
 
