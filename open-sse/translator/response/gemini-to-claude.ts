@@ -188,7 +188,16 @@ function flushMarkdownBuffer(state, results) {
  * from rendering each delta on a separate line.
  */
 export function geminiToClaudeResponse(chunk, state) {
-  if (!chunk) return null;
+  if (!chunk) {
+    if (!state?.messageId || state.upstreamError) return null;
+    const results: Record<string, unknown>[] = [];
+    flushMarkdownBuffer(state, results);
+    if (typeof state.openTextBlockIdx === "number") {
+      results.push({ type: "content_block_stop", index: state.openTextBlockIdx });
+      state.openTextBlockIdx = null;
+    }
+    return results.length > 0 ? results : null;
+  }
 
   // Handle Antigravity wrapper
   const response = chunk.response || chunk;

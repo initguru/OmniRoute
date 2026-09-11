@@ -283,7 +283,7 @@ test("OpenAI to Claude: tool call flushes a fully-held boundary before tool use"
 });
 
 test("OpenAI to Claude: reasoning flushes a fully-held boundary before thinking", () => {
-  const state = createOpenAIState();
+  const state = { ...createOpenAIState(), requestedThinking: true };
   const chunk1 = openaiToClaudeResponse(
     {
       id: "chatcmpl-held-reasoning",
