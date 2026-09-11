@@ -10,6 +10,11 @@
  * what to do (e.g., fallback to another provider, prompt user to re-login).
  */
 
+import {
+  mergeRotatedGeminiCookies,
+  parseCookies,
+  ParsedCookie,
+} from "../executors/gemini-web/cookieUtils";
 import { TOKEN_EXTRACTION_CONFIGS } from "./tokenExtractionConfig";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -25,6 +30,7 @@ interface StoredCredentialEntry {
   providerId: string;
   value: string;
   storedAt: number;
+  onRefreshed?: (newValue: string) => Promise<void> | void;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -34,7 +40,7 @@ const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute minimum
 
 // ─── Daemon ─────────────────────────────────────────────────────────────────
 
-class AutoRefreshDaemon {
+export class AutoRefreshDaemon {
   private timerId: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private checkIntervalMs: number;
@@ -51,12 +57,37 @@ class AutoRefreshDaemon {
    * Register a credential for auto-refresh monitoring.
    * Called when credentials are extracted/updated.
    */
-  registerCredential(providerId: string, value: string): void {
+  registerCredential(
+    providerId: string,
+    value: string,
+    onRefreshed?: (newValue: string) => Promise<void> | void
+  ): void {
     this.credentialStore.set(providerId, {
       providerId,
       value,
       storedAt: Date.now(),
+      onRefreshed,
     });
+  }
+
+  /**
+   * Update an existing credential value while preserving registered callbacks.
+   */
+  updateCredential(providerId: string, value: string): void {
+    const existing = this.credentialStore.get(providerId);
+    if (existing) {
+      existing.value = value;
+      existing.storedAt = Date.now();
+    } else {
+      this.registerCredential(providerId, value);
+    }
+  }
+
+  /**
+   * Get the current in-memory credential value for a provider.
+   */
+  getCredential(providerId: string): string | undefined {
+    return this.credentialStore.get(providerId)?.value;
   }
 
   /**
@@ -118,12 +149,21 @@ class AutoRefreshDaemon {
       }
 
       try {
-        const isValid = await this.validateCredential(providerId, config.homeUrl);
+        const targetUrl =
+          providerId === "gemini-web"
+            ? config.loginUrl || "https://gemini.google.com/app"
+            : config.homeUrl;
+        const isValid = await this.validateCredential(providerId, targetUrl);
         if (!isValid) {
           newlyExpired.push(providerId);
           console.warn(
             `[AutoRefreshDaemon] Credential expired for "${providerId}" (${config.displayName})`
           );
+        } else {
+          const expiredIdx = this.expiredCredentials.indexOf(providerId);
+          if (expiredIdx !== -1) {
+            this.expiredCredentials.splice(expiredIdx, 1);
+          }
         }
       } catch (err) {
         // Network errors are non-fatal — retry next cycle. G8: log which
@@ -147,27 +187,118 @@ class AutoRefreshDaemon {
    * Validate a credential by making a request to the provider's home page.
    * Returns true if the response suggests the credential is still valid.
    */
-  private async validateCredential(providerId: string, homeUrl: string): Promise<boolean> {
+  async validateCredential(providerId: string, homeUrl?: string): Promise<boolean> {
     const entry = this.credentialStore.get(providerId);
     if (!entry) return false;
+
+    const config = TOKEN_EXTRACTION_CONFIGS.get(providerId);
+    let targetUrl = homeUrl || config?.homeUrl || "";
+    if (providerId === "gemini-web") {
+      if (
+        !targetUrl ||
+        targetUrl === config?.homeUrl ||
+        targetUrl === "https://gemini.google.com"
+      ) {
+        targetUrl = config?.loginUrl || "https://gemini.google.com/app";
+      }
+    }
+
+    const isGemini = providerId === "gemini-web";
+    const method = isGemini ? "GET" : "HEAD";
+    const headers: Record<string, string> = {
+      "User-Agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    };
+    if (entry.value) {
+      headers["Cookie"] = entry.value;
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
-      const response = await fetch(homeUrl, {
-        method: "HEAD",
+      const response = await fetch(targetUrl, {
+        method,
         signal: controller.signal,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-        },
+        headers,
+        redirect: "follow",
       });
 
-      // A valid credential typically returns 200 (occasionally 301/302)
       // 401/403 strongly suggest expired credential
       if (response.status === 401 || response.status === 403) {
+        try {
+          await response.body?.cancel();
+        } catch {}
         return false;
       }
+
+      if (isGemini) {
+        const finalUrl = response.url || "";
+        const location = response.headers.get("location") || "";
+        const isGoogleLogin =
+          finalUrl.includes("accounts.google.com/ServiceLogin") ||
+          finalUrl.includes("accounts.google.com/v3/signin") ||
+          finalUrl.includes("accounts.google.com") ||
+          location.includes("accounts.google.com/ServiceLogin") ||
+          location.includes("accounts.google.com/v3/signin") ||
+          location.includes("accounts.google.com");
+
+        if (isGoogleLogin) {
+          try {
+            await response.body?.cancel();
+          } catch {}
+          return false;
+        }
+
+        // Check for rotated cookies in Set-Cookie headers
+        let rawSetCookies: string[] = [];
+        if (typeof response.headers.getSetCookie === "function") {
+          rawSetCookies = response.headers.getSetCookie();
+        }
+        const headersWithRaw = response.headers as unknown as {
+          raw?: () => Record<string, string[]>;
+        };
+        if (rawSetCookies.length === 0 && typeof headersWithRaw.raw === "function") {
+          const rawHeaders = headersWithRaw.raw();
+          if (Array.isArray(rawHeaders["set-cookie"])) {
+            rawSetCookies = rawHeaders["set-cookie"];
+          }
+        }
+        if (rawSetCookies.length === 0) {
+          const sc = response.headers.get("set-cookie");
+          if (sc) {
+            rawSetCookies = [sc];
+          }
+        }
+
+        if (rawSetCookies.length > 0) {
+          const jarCookies: ParsedCookie[] = [];
+          for (const sc of rawSetCookies) {
+            jarCookies.push(...parseCookies(sc));
+          }
+
+          if (jarCookies.length > 0) {
+            const updatedCookie = mergeRotatedGeminiCookies(entry.value, jarCookies);
+            if (updatedCookie !== entry.value) {
+              entry.value = updatedCookie;
+              entry.storedAt = Date.now();
+              if (entry.onRefreshed) {
+                try {
+                  await entry.onRefreshed(updatedCookie);
+                } catch (callbackErr) {
+                  console.warn(
+                    `[AutoRefreshDaemon] onRefreshed callback failed for "${providerId}":`,
+                    callbackErr instanceof Error ? callbackErr.message : callbackErr
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+
+      try {
+        await response.body?.cancel();
+      } catch {}
 
       return true;
     } catch (err) {
@@ -217,3 +348,19 @@ class AutoRefreshDaemon {
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
 export const autoRefreshDaemon = new AutoRefreshDaemon();
+
+export function registerCredential(
+  providerId: string,
+  value: string,
+  onRefreshed?: (newValue: string) => Promise<void> | void
+): void {
+  autoRefreshDaemon.registerCredential(providerId, value, onRefreshed);
+}
+
+export function updateCredential(providerId: string, value: string): void {
+  autoRefreshDaemon.updateCredential(providerId, value);
+}
+
+export function getCredential(providerId: string): string | undefined {
+  return autoRefreshDaemon.getCredential(providerId);
+}
