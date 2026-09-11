@@ -2,9 +2,11 @@
  * Context purifier for Gemini Web Deep Think.
  *
  * Strips CLI terminal boilerplate, hook instructions, and harness headers
- * (e.g. SessionStart hook, <EXTREMELY_IMPORTANT>, x-anthropic-billing-header,
- * <system-reminder> blocks) while preserving user-referenced documents and
- * genuine domain instructions, prominently anchoring the core user question.
+ * (e.g. SessionStart hook, <EXTREMELY[-_]IMPORTANT>, x-anthropic-billing-header,
+ * MCP Server Instructions, Delegation, Capability/Contract rules, <system-reminder>
+ * blocks) while preserving user-referenced documents and genuine domain instructions,
+ * stripping cat -n line numbers from Read tool outputs, and prominently anchoring
+ * the core user question.
  */
 
 export interface PurifiedPromptResult {
@@ -25,33 +27,92 @@ const HARNESS_FILES = new Set([
   "settings.local.json",
 ]);
 
+export function normalizeDocumentPath(rawPath: string): {
+  cleanPath: string;
+  fileName: string;
+  lowerName: string;
+} {
+  const cleanPath = rawPath.replace(/\s*\([^)]*\)$/, "").trim();
+  const fileName = cleanPath.split("/").pop() || cleanPath;
+  const lowerName = fileName.toLowerCase();
+  return { cleanPath, fileName, lowerName };
+}
+
+/**
+ * Strips line number prefixes (e.g. `1\t`, `     1\t`, ` 123   `) produced
+ * by `cat -n` or Claude Code's Read tool from every line.
+ */
+export function stripLineNumbers(raw: string): string {
+  return raw
+    .split("\n")
+    .map((line) => line.replace(/^\s*\d+(?:\t|[ ]{1,4}|$)/, ""))
+    .join("\n");
+}
+
 const BOILERPLATE_LINE_PATTERNS: readonly RegExp[] = [
   /^x-anthropic-[a-z0-9-]+:/i,
   /^You are Claude Code/i,
   /^You are a Claude agent/i,
   /^You are an agent for Claude Code/i,
-  /^SessionStart hook additional context:/i,
-  /^# Mandatory Parent Edit Barrier/i,
-  /^# Zero Direct Source Edit Policy/i,
-  /^# File-edit tool reliability/i,
-  /^# Tool-call declaration/i,
-  /^# Delegation role definitions/i,
-  /^# 공통 실행 통제 규칙/i,
-  /^# Claude Code overlay/i,
-  /^# Root-only delegation boundary/i,
+  /^SessionStart hook/i,
+  /^#+ Mandatory Parent Edit Barrier/i,
+  /^#+ Zero Direct Source Edit Policy/i,
+  /^#+ File-edit tool reliability/i,
+  /^#+ Tool-call declaration/i,
+  /^#+ Delegation/i,
+  /^#+ 공통 실행 통제 규칙/i,
+  /^#+ Claude Code overlay/i,
+  /^#+ Root-only delegation boundary/i,
+  /^#+ MCP Server Instructions/i,
+  /^#+ (?:CLI )?Harness/i,
+  /^#+ Memory\b/i,
+  /^#+ Superpowers\b/i,
+  /^#+ Available agent types\b/i,
+  /^Available agent types:/i,
+  /^#+ The Rule\b/i,
+  /^The Rule\b/i,
+  /^## Capability와 도구 사용/i,
+  /^## Contract와 설계 경계/i,
+  /^## 실행[·\s]격리[·\s]소유권/i,
+  /^## 구현[·\s]검증[·\s]완료/i,
   /^gitStatus:/i,
+  /^#+ gitStatus/i,
+  /^Today's date is/i,
+  /^#+ currentDate/i,
 ];
 
 const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
-  /<EXTREMELY_IMPORTANT>[\s\S]*?<\/EXTREMELY_IMPORTANT>/gi,
+  /<EXTREMELY[-_]IMPORTANT>[\s\S]*?<\/EXTREMELY[-_]IMPORTANT>/gi,
   /<context_window_protection>[\s\S]*?<\/context_window_protection>/gi,
   /<deferred_tool_bootstrap>[\s\S]*?<\/deferred_tool_bootstrap>/gi,
   /<tool_selection_hierarchy>[\s\S]*?<\/tool_selection_hierarchy>/gi,
   /<session_continuity>[\s\S]*?<\/session_continuity>/gi,
+  /<priority_instructions>[\s\S]*?<\/priority_instructions>/gi,
+  /<context_guidance>[\s\S]*?<\/context_guidance>/gi,
   /<env>[\s\S]*?<\/env>/gi,
   /<total_tokens>[\s\S]*?<\/total_tokens>/gi,
-  /The following skills are available for use with the Skill tool:[\s\S]*?(?=(?:\n\n[A-Za-z0-9#])|$)/gi,
-  /In this environment you have access to a set of tools[\s\S]*?(?=(?:\n\n[A-Za-z0-9#])|$)/gi,
+  /<system-reminder>[\s\S]*?<\/system-reminder>/gi,
+  /(?:^|\n)[ \t]*#+\s*MCP Server Instructions\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|Use this server|Do not use for|The following MCP servers|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Delegation\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|Role terms|Only the root|Any instruction|A subagent|\||\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Root-only delegation boundary\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*공통 실행 통제 규칙\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|client·model|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Mandatory Parent Edit Barrier\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Zero Direct Source Edit Policy\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*File-edit tool reliability\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Tool-call declaration\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Claude Code overlay\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*(?:CLI )?Harness\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Memory\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Superpowers\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Available agent types\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*Available agent types:[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
+  /(?:^|\n)[ \t]*#+\s*gitStatus[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
+  /(?:^|\n)[ \t]*gitStatus:[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*currentDate\s*\n)?Today's date is \d{4}-\d{2}-\d{2}\.?[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*#+\s*currentDate[\s\S]*?(?=(?:\n[ \t]*#(?!#) |$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?The Rule\b[^\n]*\n([\s\S]*?)(?=(?:\n[ \t]*#(?!#) |\n\n[A-Za-z0-9#가-힣]|$))/gi,
+  /The following skills are available for use with the Skill tool:[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
+  /In this environment you have access to a set of tools[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
   /Guidelines:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
   /Your strengths:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
 ];
@@ -79,7 +140,7 @@ function extractMessageText(content: unknown): string {
   return "";
 }
 
-export function sanitizeSystemPrompt(raw: string): string {
+export function stripHarnessBoilerplate(raw: string): string {
   let cleaned = raw;
 
   for (const blockPattern of BOILERPLATE_BLOCK_PATTERNS) {
@@ -101,14 +162,25 @@ export function sanitizeSystemPrompt(raw: string): string {
     if (skippingBoilerplateSection) {
       if (trimmed === "") {
         skippingBoilerplateSection = false;
+      } else if (
+        trimmed.startsWith("#") &&
+        !BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))
+      ) {
+        skippingBoilerplateSection = false;
+      } else {
+        continue;
       }
-      continue;
     }
 
     if (
       trimmed.includes("You have superpowers") ||
       trimmed.includes("SDD boundaries") ||
-      trimmed.includes("feature-dev boundaries")
+      trimmed.includes("feature-dev boundaries") ||
+      trimmed.includes("SessionStart hook") ||
+      trimmed.includes("Capability와 도구 사용") ||
+      trimmed.includes("Contract와 설계 경계") ||
+      trimmed.includes("실행·격리·소유권") ||
+      trimmed.includes("구현·검증·완료")
     ) {
       continue;
     }
@@ -122,11 +194,11 @@ export function sanitizeSystemPrompt(raw: string): string {
     .trim();
 }
 
-function extractDocsFromSystemReminder(
-  srBody: string,
-  userTextWithoutReminders: string,
-  extractedDocs: string[]
-): void {
+export function sanitizeSystemPrompt(raw: string): string {
+  return stripHarnessBoilerplate(raw);
+}
+
+function extractDocsFromSystemReminder(srBody: string, extractedDocs: string[]): void {
   const contentsOfRegex =
     /(?:^|\n)[ \t]*Contents of ([^\n:]+):\s*\n([\s\S]*?)(?=(?:\n[ \t]*Contents of |\n[ \t]*# |\n[ \t]*<[a-z0-9_-]+|$))/gi;
   let match: RegExpExecArray | null;
@@ -134,15 +206,9 @@ function extractDocsFromSystemReminder(
   while ((match = contentsOfRegex.exec(srBody)) !== null) {
     const rawPath = match[1].trim();
     const content = match[2].trim();
-    const fileName = rawPath.split("/").pop() || rawPath;
-    const lowerName = fileName.toLowerCase();
+    const { fileName, lowerName } = normalizeDocumentPath(rawPath);
 
-    const userMentions =
-      userTextWithoutReminders.includes(`@${fileName}`) ||
-      userTextWithoutReminders.toLowerCase().includes(`@${lowerName}`) ||
-      userTextWithoutReminders.includes(fileName);
-
-    if (userMentions || !HARNESS_FILES.has(lowerName)) {
+    if (!HARNESS_FILES.has(lowerName)) {
       extractedDocs.push(`Contents of ${fileName}:\n${content}`);
     }
   }
@@ -152,66 +218,210 @@ function extractDocsFromSystemReminder(
   while ((match = fileTagRegex.exec(srBody)) !== null) {
     const rawPath = (match[1] || "").trim();
     const content = match[2].trim();
-    const fileName = rawPath.split("/").pop() || rawPath;
-    const lowerName = fileName.toLowerCase();
+    const { lowerName } = normalizeDocumentPath(rawPath);
 
-    const userMentions =
-      !rawPath ||
-      userTextWithoutReminders.includes(`@${fileName}`) ||
-      userTextWithoutReminders.toLowerCase().includes(`@${lowerName}`) ||
-      userTextWithoutReminders.includes(fileName);
-
-    if (userMentions || !HARNESS_FILES.has(lowerName)) {
+    if (!HARNESS_FILES.has(lowerName)) {
       extractedDocs.push(rawPath ? `<file path="${rawPath}">\n${content}\n</file>` : content);
     }
   }
+}
+
+function extractReadToolOutputs(text: string): {
+  cleanedText: string;
+  readDocs: string[];
+} {
+  const readDocs: string[] = [];
+
+  const readToolCallRegex =
+    /(?:^|\n)[ \t]*Called the Read tool with the following input:\s*(\{[\s\S]*?\})\s*[\s\S]*?Result of calling the Read tool:\s*\n/gi;
+
+  let cleaned = text;
+  let match: RegExpExecArray | null;
+
+  while ((match = readToolCallRegex.exec(cleaned)) !== null) {
+    const fullMatch = match[0];
+    const matchIndex = match.index;
+    const jsonStr = match[1];
+
+    let filePath = "";
+    try {
+      const parsed = JSON.parse(jsonStr) as { file_path?: string };
+      if (typeof parsed.file_path === "string") {
+        filePath = parsed.file_path;
+      }
+    } catch {
+      const fpMatch = /"file_path"\s*:\s*"([^"]+)"/.exec(jsonStr);
+      if (fpMatch) filePath = fpMatch[1];
+    }
+
+    const afterHeader = cleaned.slice(matchIndex + fullMatch.length);
+    const lines = afterHeader.split("\n");
+    const outputLines: string[] = [];
+
+    let consumedLines = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^\s*\d+(?:\t|[ ]{1,4}|$)/.test(line)) {
+        outputLines.push(line);
+        consumedLines = i + 1;
+      } else if (line.trim() === "") {
+        let hasMoreNumbered = false;
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          if (/^\s*\d+(?:\t|[ ]{1,4}|$)/.test(lines[j])) {
+            hasMoreNumbered = true;
+            break;
+          }
+          if (lines[j].trim() !== "") break;
+        }
+        if (hasMoreNumbered) {
+          outputLines.push(line);
+          consumedLines = i + 1;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    const { fileName, lowerName } = normalizeDocumentPath(filePath || "document");
+    if (!HARNESS_FILES.has(lowerName) && outputLines.length > 0) {
+      const rawContent = outputLines.join("\n");
+      const stripped = stripLineNumbers(rawContent).trim();
+      readDocs.push(`[참조 문서: ${fileName}]\n${stripped}`);
+    }
+
+    const consumedTextLength = lines.slice(0, consumedLines).join("\n").length;
+    const totalBlockLength = fullMatch.length + (consumedLines > 0 ? consumedTextLength : 0);
+
+    cleaned = cleaned.slice(0, matchIndex) + "\n" + cleaned.slice(matchIndex + totalBlockLength);
+
+    readToolCallRegex.lastIndex = matchIndex;
+  }
+
+  // Also catch standalone Result of calling the Read tool:\n if any
+  const standaloneResultRegex = /(?:^|\n)[ \t]*Result of calling the Read tool:\s*\n/gi;
+  while ((match = standaloneResultRegex.exec(cleaned)) !== null) {
+    const fullMatch = match[0];
+    const matchIndex = match.index;
+    const afterHeader = cleaned.slice(matchIndex + fullMatch.length);
+    const lines = afterHeader.split("\n");
+    const outputLines: string[] = [];
+
+    let consumedLines = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^\s*\d+(?:\t|[ ]{1,4}|$)/.test(line)) {
+        outputLines.push(line);
+        consumedLines = i + 1;
+      } else if (line.trim() === "") {
+        let hasMoreNumbered = false;
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          if (/^\s*\d+(?:\t|[ ]{1,4}|$)/.test(lines[j])) {
+            hasMoreNumbered = true;
+            break;
+          }
+          if (lines[j].trim() !== "") break;
+        }
+        if (hasMoreNumbered) {
+          outputLines.push(line);
+          consumedLines = i + 1;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (outputLines.length > 0) {
+      const rawContent = outputLines.join("\n");
+      const stripped = stripLineNumbers(rawContent).trim();
+      readDocs.push(`[참조 문서: Read tool]\n${stripped}`);
+    }
+
+    const consumedTextLength = lines.slice(0, consumedLines).join("\n").length;
+    const totalBlockLength = fullMatch.length + (consumedLines > 0 ? consumedTextLength : 0);
+
+    cleaned = cleaned.slice(0, matchIndex) + "\n" + cleaned.slice(matchIndex + totalBlockLength);
+
+    standaloneResultRegex.lastIndex = matchIndex;
+  }
+
+  return { cleanedText: cleaned, readDocs };
 }
 
 function processUserMessage(rawText: string): { userQuestion: string; extractedDocs: string[] } {
   let text = rawText;
   const extractedDocs: string[] = [];
 
-  const textWithoutReminders = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "");
-
+  // 1. Extract docs from <system-reminder> blocks
   const systemReminderRegex = /<system-reminder>([\s\S]*?)<\/system-reminder>/gi;
   let srMatch: RegExpExecArray | null;
   while ((srMatch = systemReminderRegex.exec(text)) !== null) {
     const srBody = srMatch[1];
-    extractDocsFromSystemReminder(srBody, textWithoutReminders, extractedDocs);
+    extractDocsFromSystemReminder(srBody, extractedDocs);
   }
 
+  // Remove <system-reminder> and common wrapper tags
   text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "");
   text = text.replace(/<\/?system-reminder>/gi, "");
   text = text.replace(/<total_tokens>[\s\S]*?<\/total_tokens>/gi, "");
   text = text.replace(/<env>[\s\S]*?<\/env>/gi, "");
 
+  // 2. Parse and extract Read tool calls
+  const { cleanedText: textAfterRead, readDocs } = extractReadToolOutputs(text);
+  text = textAfterRead;
+  for (const doc of readDocs) {
+    extractedDocs.push(doc);
+  }
+
+  // Remove any remaining tool call blocks (Bash, Edit, etc.)
+  text = text.replace(
+    /(?:^|\n)[ \t]*Called the [A-Za-z0-9_-]+ tool with the following input:[\s\S]*?(?:Result of calling the [A-Za-z0-9_-]+ tool:[\s\S]*?)?(?=(?:\n[ \t]*Called the [A-Za-z0-9_-]+ tool|\n[ \t]*# |\n[ \t]*<[a-z0-9_-]+|\n[ \t]*\[(?:사용자|시스템|참조|이전)|$))/gi,
+    "\n"
+  );
+
+  // 3. Extract <file path="...">...</file>
   text = text.replace(
     /(?:^|\n)[ \t]*<file(?:\s+(?:path|name)="([^"]*)")?>\s*([\s\S]*?)\s*<\/file>(?:\n|$)/gi,
     (_match, path, content) => {
-      const docHeader = path ? `<file path="${path}">\n${content.trim()}\n</file>` : content.trim();
-      extractedDocs.push(docHeader);
+      const { lowerName } = normalizeDocumentPath(path || "");
+      if (!path || !HARNESS_FILES.has(lowerName)) {
+        const docHeader = path
+          ? `<file path="${path}">\n${content.trim()}\n</file>`
+          : content.trim();
+        extractedDocs.push(docHeader);
+      }
       return "\n";
     }
   );
 
+  // 4. Extract Contents of <path> (explanation):
   text = text.replace(
-    /(?:^|\n)[ \t]*Contents of ([^\n:]+):\s*\n([\s\S]*?)(?=(?:\n[ \t]*Contents of |\n[ \t]*<file|\n[ \t]*`{3,}|$))/gi,
-    (_match, path, content) => {
-      const trimmedPath = path.trim();
-      const fileName = trimmedPath.split("/").pop() || trimmedPath;
-      extractedDocs.push(`Contents of ${fileName}:\n${content.trim()}`);
+    /(?:^|\n)[ \t]*Contents of ([^\n:]+):\s*\n([\s\S]*?)(?=(?:\n[ \t]*Contents of |\n[ \t]*<file|\n[ \t]*`{3,}|\n\n(?=[가-힣A-Z][^\n]*(?:[?.!]|해줘|해주세요|알려줘|바랍니다|설명해줘))|$))/gi,
+    (_match, rawPath, content) => {
+      const { fileName, lowerName } = normalizeDocumentPath(rawPath);
+      if (!HARNESS_FILES.has(lowerName)) {
+        extractedDocs.push(`Contents of ${fileName}:\n${content.trim()}`);
+      }
       return "\n";
     }
   );
 
+  // 5. Extract --- name ---
   text = text.replace(
     /(?:^|\n)[ \t]*---+[ \t]*([^\n]+?)[ \t]*---+[ \t]*\n([\s\S]*?)(?:\n[ \t]*---+[ \t]*|$)/gi,
     (_match, name, content) => {
-      extractedDocs.push(`--- ${name.trim()} ---\n${content.trim()}`);
+      const { fileName, lowerName } = normalizeDocumentPath(name.trim());
+      if (!HARNESS_FILES.has(lowerName)) {
+        extractedDocs.push(`--- ${fileName} ---\n${content.trim()}`);
+      }
       return "\n";
     }
   );
 
+  // 6. Extract markdown code blocks
   text = text.replace(
     /(?:^|\n)[ \t]*(`{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\1(?:\n|$)/g,
     (_match, fence, lang, code) => {
@@ -219,6 +429,9 @@ function processUserMessage(rawText: string): { userQuestion: string; extractedD
       return "\n";
     }
   );
+
+  // 7. Strip all CLI harness / MCP / Superpowers / delegation boilerplate from remaining text
+  text = stripHarnessBoilerplate(text);
 
   const userQuestion = text.trim();
   return { userQuestion, extractedDocs };
@@ -228,6 +441,7 @@ function sanitizeTurnText(text: string): string {
   let cleaned = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "");
   cleaned = cleaned.replace(/<total_tokens>[\s\S]*?<\/total_tokens>/gi, "");
   cleaned = cleaned.replace(/<env>[\s\S]*?<\/env>/gi, "");
+  cleaned = stripHarnessBoilerplate(cleaned);
   return cleaned.trim();
 }
 

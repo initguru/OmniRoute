@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   purifyDeepThinkPrompt,
+  stripLineNumbers,
   type PurifiedPromptResult,
 } from "../../open-sse/executors/gemini-web/deepThinkPurifier.ts";
 
@@ -327,4 +328,227 @@ Virtual Metrology Platform Spec
 
   assert.ok(sysIdx < docIdx, "[시스템 지침] must precede [참조 문서 / 첨부 파일]");
   assert.ok(docIdx < userIdx, "[참조 문서 / 첨부 파일] must precede [사용자 질문]");
+});
+
+test("Gemini Deep Think Purifier — stripLineNumbers removes line number prefixes from cat -n style output", () => {
+  const numbered = [
+    "     1\timport { Router } from 'express';",
+    "     2\t",
+    "     3\tconst router = Router();",
+    "   120    return router;",
+    "    42  const port = 3000;",
+  ].join("\n");
+
+  const stripped = stripLineNumbers(numbered);
+  const lines = stripped.split("\n");
+
+  assert.equal(lines[0], "import { Router } from 'express';");
+  assert.equal(lines[1], "");
+  assert.equal(lines[2], "const router = Router();");
+  assert.equal(lines[3], "return router;");
+  assert.equal(lines[4], "const port = 3000;");
+});
+
+test("Gemini Deep Think Purifier — extracts Read tool outputs, strips line numbers, and labels with [참조 문서: <파일명>]", () => {
+  const userContent = `Called the Read tool with the following input: {"file_path":"/Users/jihyun.son/github/OmniRoute/src/server.ts"}
+Result of calling the Read tool:
+     1\timport express from "express";
+     2\t
+     3\tconst app = express();
+     4\tapp.listen(3000);
+
+이 서버의 리스닝 포트를 8080으로 변경하는 방법을 알려줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "이 서버의 리스닝 포트를 8080으로 변경하는 방법을 알려줘.");
+  assert.equal(result.extractedDocs.length, 1);
+  assert.ok(result.extractedDocs[0].startsWith("[참조 문서: server.ts]"));
+  assert.ok(!result.extractedDocs[0].includes("1\t"));
+  assert.ok(result.extractedDocs[0].includes('import express from "express";'));
+  assert.ok(result.extractedDocs[0].includes("app.listen(3000);"));
+
+  assert.ok(result.prompt.includes("[참조 문서: server.ts]"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("이 서버의 리스닝 포트를 8080으로 변경하는 방법을 알려줘."));
+  assert.ok(!result.prompt.includes("Called the Read tool"));
+});
+
+test("Gemini Deep Think Purifier — blocks Read tool output for HARNESS_FILES", () => {
+  const userContent = `Called the Read tool with the following input: {"file_path":"/Users/jihyun.son/github/OmniRoute/CLAUDE.md"}
+Result of calling the Read tool:
+     1\t# CLAUDE.md
+     2\t## Hard Rules
+     3\tNever commit directly to main
+
+이 프로젝트의 Git 브랜치 전략을 알려줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "이 프로젝트의 Git 브랜치 전략을 알려줘.");
+  assert.equal(result.extractedDocs.length, 0);
+  assert.ok(!result.prompt.includes("Never commit directly to main"));
+  assert.ok(!result.prompt.includes("Called the Read tool"));
+  assert.ok(result.prompt.includes("이 프로젝트의 Git 브랜치 전략을 알려줘."));
+});
+
+test("Gemini Deep Think Purifier — blocks Contents of blocks with parenthesis explanations matching HARNESS_FILES", () => {
+  const userContent = `Contents of /Users/jihyun.son/.claude/rules/context7.md (user's private global instructions for all projects):
+Use Context7 MCP whenever the user asks about a library.
+
+Contents of /Users/jihyun.son/github/OmniRoute/CLAUDE.md (project instructions, checked into the codebase):
+# CLAUDE.md instructions
+
+Contents of /Users/jihyun.son/github/OmniRoute/SPEC.md (architecture specification):
+# High-Level Architecture
+Client -> Proxy -> Provider
+
+위 아키텍처 스펙을 검토해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "위 아키텍처 스펙을 검토해줘.");
+  assert.equal(result.extractedDocs.length, 1);
+  assert.ok(result.extractedDocs[0].includes("High-Level Architecture"));
+  assert.ok(!result.prompt.includes("Use Context7 MCP"));
+  assert.ok(!result.prompt.includes("CLAUDE.md instructions"));
+  assert.ok(result.prompt.includes("Client -> Proxy -> Provider"));
+});
+
+test("Gemini Deep Think Purifier — completely strips CLI harness, superpowers, MCP, and delegation boilerplate from user message", () => {
+  const userContent = `# Delegation role definitions
+Role terms in this prompt are structural: "root/main session" means the primary conversation.
+Only the root/main session coordinates work. Every subagent is a terminal leaf worker.
+
+# 공통 실행 통제 규칙
+## Capability와 도구 사용
+- capability는 실제 도구 목록에 노출되고 최소 1회 성공 호출됐을 때만 사용했다고 주장.
+## Contract와 설계 경계
+- 한 task = 하나의 production contract.
+## 실행·격리·소유권
+- 구현 전 계획·task ownership·baseline 고정.
+## 구현·검증·완료
+- 실행 근거 없이 완료 선언 금지.
+
+# MCP Server Instructions
+The following MCP servers have provided instructions for how to use their tools:
+## context7
+Use this server to fetch current documentation.
+## plugin:context7:context7
+Use this server to fetch docs.
+
+# Mandatory Parent Edit Barrier
+As the root/main coordinator, you are STRICTLY PROHIBITED from calling Edit or Write.
+
+오늘 날짜 기준 Next.js 16의 새로운 라우팅 기능을 설명해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "오늘 날짜 기준 Next.js 16의 새로운 라우팅 기능을 설명해줘.");
+  assert.equal(result.extractedDocs.length, 0);
+  assert.ok(!result.prompt.includes("Delegation role definitions"));
+  assert.ok(!result.prompt.includes("공통 실행 통제 규칙"));
+  assert.ok(!result.prompt.includes("Capability와 도구 사용"));
+  assert.ok(!result.prompt.includes("Contract와 설계 경계"));
+  assert.ok(!result.prompt.includes("MCP Server Instructions"));
+  assert.ok(!result.prompt.includes("Mandatory Parent Edit Barrier"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("오늘 날짜 기준 Next.js 16의 새로운 라우팅 기능을 설명해줘."));
+});
+
+test("Gemini Deep Think Purifier — omits [시스템 지침] when system prompt contains only MCP server instructions and harness noise", () => {
+  const systemPrompt = `# MCP Server Instructions
+
+The following MCP servers have provided instructions for how to use their tools and resources:
+
+## context7
+Use this server to fetch current documentation whenever the user asks about a library.
+
+## plugin:context7:context7
+Use this server to fetch current documentation.
+
+# The Rule
+Follow all instructions.
+`;
+
+  const messages = [{ role: "user", content: "React 19 Server Actions에 대해 설명해줘." }];
+  const result = purifyDeepThinkPrompt(messages, systemPrompt);
+
+  assert.equal(result.hasUserContent, true);
+  assert.ok(!result.prompt.includes("[시스템 지침]"));
+  assert.ok(!result.prompt.includes("MCP Server Instructions"));
+  assert.ok(!result.prompt.includes("The Rule"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("React 19 Server Actions에 대해 설명해줘."));
+});
+
+test("Gemini Deep Think Purifier — filters parenthesis explanations from Contents of inside <system-reminder>", () => {
+  const userContent = `<system-reminder>
+Contents of /Users/jihyun.son/.claude/rules/context7.md (user's private global instructions for all projects):
+Use Context7 MCP whenever the user asks about a library.
+
+Contents of /Users/jihyun.son/github/OmniRoute/CLAUDE.md (project instructions, checked into the codebase):
+# CLAUDE.md instructions
+
+Contents of /Users/jihyun.son/github/OmniRoute/DESIGN.md (design document):
+# System Design Spec
+Microservices and event streams
+</system-reminder>
+
+시스템 디자인 스펙을 평가해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "시스템 디자인 스펙을 평가해줘.");
+  assert.equal(result.extractedDocs.length, 1);
+  assert.ok(result.extractedDocs[0].includes("System Design Spec"));
+  assert.ok(result.extractedDocs[0].includes("Microservices and event streams"));
+  assert.ok(!result.prompt.includes("Use Context7 MCP"));
+  assert.ok(!result.prompt.includes("CLAUDE.md instructions"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("시스템 디자인 스펙을 평가해줘."));
+});
+
+test("Gemini Deep Think Purifier — handles multiple Read tool calls and strips all line numbers cleanly", () => {
+  const userContent = `Called the Read tool with the following input: {"file_path":"src/a.ts"}
+Result of calling the Read tool:
+     1	export const a = 1;
+     2
+
+Called the Read tool with the following input: {"file_path":"src/b.ts"}
+Result of calling the Read tool:
+     1	export const b = 2;
+     2	export const c = 3;
+
+a.ts와 b.ts의 변수를 확인하고 합산 로직을 작성해줘.`;
+
+  const messages = [{ role: "user", content: userContent }];
+  const result = purifyDeepThinkPrompt(messages);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "a.ts와 b.ts의 변수를 확인하고 합산 로직을 작성해줘.");
+  assert.equal(result.extractedDocs.length, 2);
+  assert.ok(result.extractedDocs[0].startsWith("[참조 문서: a.ts]"));
+  assert.ok(result.extractedDocs[0].includes("export const a = 1;"));
+  assert.ok(!result.extractedDocs[0].includes("1\t"));
+
+  assert.ok(result.extractedDocs[1].startsWith("[참조 문서: b.ts]"));
+  assert.ok(result.extractedDocs[1].includes("export const b = 2;"));
+  assert.ok(result.extractedDocs[1].includes("export const c = 3;"));
+  assert.ok(!result.extractedDocs[1].includes("1\t"));
+
+  assert.ok(result.prompt.includes("[참조 문서: a.ts]"));
+  assert.ok(result.prompt.includes("[참조 문서: b.ts]"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("a.ts와 b.ts의 변수를 확인하고 합산 로직을 작성해줘."));
 });
