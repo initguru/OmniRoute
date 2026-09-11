@@ -18,6 +18,7 @@ import { buildErrorBody, sanitizeErrorMessage } from "../utils/error.ts";
 import { normalizeGeminiCookieInput } from "../utils/geminiCookies.ts";
 import { prepareToolMessages } from "../translator/webTools.ts";
 import { buildToolModeResponse } from "./chatgptWebTools.ts";
+import { purifyDeepThinkPrompt } from "./gemini-web/deepThinkPurifier.ts";
 import {
   checkGeminiWebUnsupportedControls,
   GEMINI_WEB_UNSUPPORTED_CONTROL_CODE,
@@ -39,6 +40,13 @@ import {
 
 const GEMINI_URL = "https://gemini.google.com/app";
 export const DEFAULT_GEMINI_WEB_BUILD_LABEL = "boq_assistant-bard-web-server_20260907.07_p0";
+
+/**
+ * Checks if model ID corresponds to Gemini Web Deep Think.
+ */
+export function isDeepThinkModel(modelId: string): boolean {
+  return modelId === "gemini-deep-think" || modelId === GEMINI_DEEP_THINK_MODEL_ID;
+}
 
 /**
  * Whether an error came from Playwright failing to launch because the browser binary is not
@@ -1048,20 +1056,38 @@ export class GeminiWebExecutor extends BaseExecutor {
       };
     }
 
-    const messages = requestBody.messages || [];
-    const { hasTools, requestedTools, effectiveMessages } = prepareToolMessages(
-      body as Record<string, unknown>,
-      messages
-    );
+    const useBrowserAutomation =
+      (
+        credentials?.providerSpecificData as
+          { browserAutomation?: boolean; engine?: string } | undefined
+      )?.browserAutomation === true ||
+      (credentials?.providerSpecificData as { engine?: string } | undefined)?.engine === "browser";
 
-    // hasTools === false: flatten the full multi-turn history into the single
-    // prompt so gemini-web (a stateless web-cookie provider that captures only
-    // the first StreamGenerate response) preserves prior context across turns
-    // (#8371). Single-turn requests stay byte-for-byte identical to the original
-    // derivation, keeping the #7286 no-tools regression guard intact.
-    const prompt = hasTools
-      ? buildGeminiToolPrompt(effectiveMessages)
-      : buildGeminiPrompt(messages);
+    const messages = requestBody.messages || [];
+
+    let hasTools = false;
+    let requestedTools: unknown = undefined;
+    let prompt: string;
+
+    if (isDeepThinkModel(modelId) && !useBrowserAutomation) {
+      hasTools = false;
+      requestedTools = undefined;
+      const purified = purifyDeepThinkPrompt(messages, (body as { system?: unknown })?.system);
+      prompt = purified.prompt;
+    } else {
+      const toolPrep = prepareToolMessages(body as Record<string, unknown>, messages);
+      hasTools = toolPrep.hasTools;
+      requestedTools = toolPrep.requestedTools;
+
+      // hasTools === false: flatten the full multi-turn history into the single
+      // prompt so gemini-web (a stateless web-cookie provider that captures only
+      // the first StreamGenerate response) preserves prior context across turns
+      // (#8371). Single-turn requests stay byte-for-byte identical to the original
+      // derivation, keeping the #7286 no-tools regression guard intact.
+      prompt = hasTools
+        ? buildGeminiToolPrompt(toolPrep.effectiveMessages)
+        : buildGeminiPrompt(messages);
+    }
 
     if (!prompt) {
       return {
@@ -1075,14 +1101,7 @@ export class GeminiWebExecutor extends BaseExecutor {
       };
     }
 
-    const useBrowserAutomation =
-      (
-        credentials?.providerSpecificData as
-          { browserAutomation?: boolean; engine?: string } | undefined
-      )?.browserAutomation === true ||
-      (credentials?.providerSpecificData as { engine?: string } | undefined)?.engine === "browser";
-
-    if (modelId === "gemini-deep-think" && !useBrowserAutomation) {
+    if (isDeepThinkModel(modelId) && !useBrowserAutomation) {
       return this.executeDirectDeepThink({
         input,
         cookie,

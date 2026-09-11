@@ -240,22 +240,40 @@ describe("GeminiWebExecutor Direct API (gemini-deep-think)", () => {
     });
 
     const executor = new GeminiWebExecutor();
-    const result = await executor.execute({
-      model: "gemini-deep-think",
-      body: {
-        messages: [{ role: "user", content: "What is the weather?" }],
-        tools: [{ type: "function", function: { name: "lookup", parameters: {} } }],
+    const result = await (
+      executor as unknown as {
+        executeDirectDeepThink: (params: {
+          input: ExecuteInput;
+          cookie: string;
+          prompt: string;
+          modelId: string;
+          hasTools: boolean;
+          requestedTools: unknown;
+        }) => Promise<{ response: Response }>;
+      }
+    ).executeDirectDeepThink({
+      input: {
+        model: "gemini-deep-think",
+        body: {
+          messages: [{ role: "user", content: "What is the weather?" }],
+          tools: [{ type: "function", function: { name: "lookup", parameters: {} } }],
+          stream: false,
+        },
         stream: false,
-      },
-      stream: false,
-      credentials: {
-        apiKey: "__Secure-1PSID=test-sid",
-        providerSpecificData: { pollIntervalMs: 5 },
-      },
-      signal: AbortSignal.timeout(10000),
-      log: null,
-      fetch: mockFetch as unknown as typeof fetch,
-    } as unknown as ExecuteInput);
+        credentials: {
+          apiKey: "__Secure-1PSID=test-sid",
+          providerSpecificData: { pollIntervalMs: 5 },
+        },
+        signal: AbortSignal.timeout(10000),
+        log: null,
+        fetch: mockFetch as unknown as typeof fetch,
+      } as unknown as ExecuteInput,
+      cookie: "__Secure-1PSID=test-sid",
+      prompt: "What is the weather?",
+      modelId: "gemini-deep-think",
+      hasTools: true,
+      requestedTools: [{ type: "function", function: { name: "lookup", parameters: {} } }],
+    });
 
     assert.equal(result.response.status, 200);
     const json = (await result.response.json()) as CompletionResponseShape;
