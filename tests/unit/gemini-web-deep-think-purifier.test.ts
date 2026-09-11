@@ -236,7 +236,7 @@ test("Gemini Deep Think Purifier — handles array content blocks ({ type: 'text
   assert.equal(result.hasUserContent, true);
   assert.equal(
     result.userQuestion,
-    "안녕하세요! 반도체 에칭 공정 시뮬레이션 모델에 대해 질문이 있습니다."
+    "안녕하세요! \n\n반도체 에칭 공정 시뮬레이션 모델에 대해 질문이 있습니다."
   );
   assert.ok(result.prompt.includes("[사용자 질문]"));
   assert.ok(result.prompt.includes("반도체 에칭 공정 시뮬레이션 모델에 대해 질문이 있습니다."));
@@ -673,4 +673,129 @@ Result of calling the Read tool:
   assert.ok(doc.includes("| 1 | Table entry 100 |"));
   assert.ok(doc.includes("[...truncated 1000 chars...]"));
   assert.ok(doc.includes("Price is $500 for 2 items."));
+});
+
+test("Gemini Deep Think Purifier — reproduces call 1789131870157-9f2db3: client operational harness in system array is stripped and [시스템 지침] is omitted", () => {
+  const systemArray = [
+    {
+      type: "text",
+      text: "x-anthropic-billing-header: cc-uuid-9f2db3-4451",
+    },
+    {
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+    },
+    {
+      type: "text",
+      text: `You are an interactive agent that helps users with software engineering tasks.
+
+Security guidance: Do not assist with cyberattacks or bypass security controls.
+
+Pronouns: The user may refer to you as Claude.
+
+Reversibility: When modifying code, make changes that are easily reversible.
+
+# Session-specific guidance
+You are currently in a multi-turn conversation.
+Follow the user's instructions carefully.
+
+Do not assume capabilities that are not exposed.
+
+# Memory
+You have a persistent file-based memory at /Users/jihyun.son/.claude/projects/-Users-jihyun-son-github-OmniRoute/memory/
+Review memory files before performing critical actions.
+
+# Environment
+Working directory: /Users/jihyun.son/github/OmniRoute/.claude/worktrees/gemini-web-robust-enhancements
+Is directory a git repo: true
+
+# Context management
+Keep your context window clean.
+Do not read unnecessary files.`,
+    },
+  ];
+
+  const messages = [
+    {
+      role: "user",
+      content: `다음 아키텍처 스펙을 검토해줘. @SPEC.md
+
+\`\`\`markdown
+# SPEC.md
+Streaming architecture specification.
+\`\`\``,
+    },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages, systemArray);
+
+  assert.equal(result.hasUserContent, true);
+  assert.equal(result.userQuestion, "다음 아키텍처 스펙을 검토해줘. @SPEC.md");
+  assert.equal(result.extractedDocs.length, 1);
+  assert.ok(result.extractedDocs[0].includes("Streaming architecture specification."));
+
+  // [시스템 지침] must be completely omitted because systemArray only contains CLI harness
+  assert.ok(!result.prompt.includes("[시스템 지침]"));
+  assert.ok(!result.prompt.includes("You are an interactive agent"));
+  assert.ok(!result.prompt.includes("Session-specific guidance"));
+  assert.ok(!result.prompt.includes("persistent file-based memory"));
+  assert.ok(!result.prompt.includes("Context management"));
+  assert.ok(!result.prompt.includes("x-anthropic-billing-header"));
+  assert.ok(!result.prompt.includes("Security guidance"));
+  assert.ok(!result.prompt.includes("Reversibility"));
+  assert.ok(!result.prompt.includes("Pronouns"));
+
+  // Preserved verbatim sections
+  assert.ok(result.prompt.includes("[참조 문서 / 첨부 파일]"));
+  assert.ok(result.prompt.includes("Streaming architecture specification."));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("다음 아키텍처 스펙을 검토해줘. @SPEC.md"));
+});
+
+test("Gemini Deep Think Purifier — preserves genuine domain instructions under [시스템 지침] when mixed with client operational harness", () => {
+  const systemArray = [
+    {
+      type: "text",
+      text: "x-anthropic-billing-header: cc-uuid-9f2db3-4451",
+    },
+    {
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+    },
+    {
+      type: "text",
+      text: `You are an interactive agent that helps users with software engineering tasks.
+
+# Session-specific guidance
+Follow the user's instructions carefully.
+
+More operational rules.
+
+# Context management
+Do not read unnecessary files.`,
+    },
+    {
+      type: "text",
+      text: "전문적이고 객관적인 어조로 답변하십시오.",
+    },
+  ];
+
+  const messages = [
+    {
+      role: "user",
+      content: "분산 트랜잭션의 2PC와 SAGA 패턴의 차이점을 설명해줘.",
+    },
+  ];
+
+  const result = purifyDeepThinkPrompt(messages, systemArray);
+
+  assert.equal(result.hasUserContent, true);
+  assert.ok(result.prompt.includes("[시스템 지침]"));
+  assert.ok(result.prompt.includes("전문적이고 객관적인 어조로 답변하십시오."));
+  assert.ok(!result.prompt.includes("You are an interactive agent"));
+  assert.ok(!result.prompt.includes("Session-specific guidance"));
+  assert.ok(!result.prompt.includes("Context management"));
+  assert.ok(!result.prompt.includes("x-anthropic-billing-header"));
+  assert.ok(result.prompt.includes("[사용자 질문]"));
+  assert.ok(result.prompt.includes("분산 트랜잭션의 2PC와 SAGA 패턴의 차이점을 설명해줘."));
 });

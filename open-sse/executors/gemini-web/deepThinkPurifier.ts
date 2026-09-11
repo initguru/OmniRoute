@@ -87,6 +87,51 @@ const BOILERPLATE_LINE_PATTERNS: readonly RegExp[] = [
   /^Using superpowers:/i,
   /^#+ Environment\b/i,
   /^You are powered by the model/i,
+  /^You are an interactive agent that helps users with software engineering tasks/i,
+  /^#+ Session-specific guidance\b/i,
+  /^You have a persistent file-based memory at\b/i,
+  /^#+ Context management\b/i,
+  /^(?:#+\s*)?Security guidance\b/i,
+  /^(?:#+\s*)?Security testing\b/i,
+  /^(?:#+\s*)?Pronouns?(?:\s+guidance)?\b/i,
+  /^(?:#+\s*)?Reversibility\b/i,
+];
+
+const BOILERPLATE_SECTION_HEADER_PATTERNS: readonly RegExp[] = [
+  /^#+ Mandatory Parent Edit Barrier/i,
+  /^#+ Zero Direct Source Edit Policy/i,
+  /^#+ File-edit tool reliability/i,
+  /^#+ Tool-call declaration/i,
+  /^#+ Delegation/i,
+  /^#+ 공통 실행 통제 규칙/i,
+  /^#+ Claude Code overlay/i,
+  /^#+ Root-only delegation boundary/i,
+  /^#+ MCP Server Instructions/i,
+  /^#+ (?:CLI )?Harness/i,
+  /^#+ Memory\b/i,
+  /^#+ Superpowers\b/i,
+  /^#+ Available agent types\b/i,
+  /^Available agent types:/i,
+  /^#+ The Rule\b/i,
+  /^The Rule\b/i,
+  /^## Capability와 도구 사용/i,
+  /^## Contract와 설계 경계/i,
+  /^## 실행[·\s]격리[·\s]소유권/i,
+  /^## 구현[·\s]검증[·\s]완료/i,
+  /^#+ gitStatus/i,
+  /^#+ currentDate/i,
+  /^#+ Environment\b/i,
+  /^#+ Session-specific guidance\b/i,
+  /^#+ Context management\b/i,
+  /^#+ Tone and style\b/i,
+  /^(?:#+\s*)?Security guidance\b/i,
+  /^(?:#+\s*)?Security testing\b/i,
+  /^(?:#+\s*)?Pronouns?(?:\s+guidance)?\b/i,
+  /^(?:#+\s*)?Reversibility\b/i,
+  /^You are an interactive agent that helps users with software engineering tasks/i,
+  /^You have a persistent file-based memory at\b/i,
+  /^Guidelines:\s*$/i,
+  /^Your strengths:\s*$/i,
 ];
 
 const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
@@ -127,6 +172,14 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /In this environment you have access to a set of tools[\s\S]*?(?=(?:\n\n[A-Za-z0-9#가-힣])|$)/gi,
   /Guidelines:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
   /Your strengths:\s*\n(?:[ \t]*-[^\n]*\n?)+/gi,
+  /(?:^|\n)[ \t]*You are an interactive agent that helps users with software engineering tasks[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Session-specific guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
+  /(?:^|\n)[ \t]*#+\s*Context management\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
+  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?=[가-힣])|\n\n(?=\[)|$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Security guidance\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Security testing\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Pronouns?(?:\s+guidance)?\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
+  /(?:^|\n)[ \t]*(?:#+\s*)?Reversibility(?:\s+guidance)?\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n\n[가-힣A-Za-z0-9#]|$))/gi,
 ];
 
 function extractMessageText(content: unknown): string {
@@ -143,7 +196,7 @@ function extractMessageText(content: unknown): string {
         }
       }
     }
-    return textParts.join("");
+    return textParts.filter((t) => t.trim().length > 0).join("\n\n");
   }
   if (content && typeof content === "object") {
     const item = content as { text?: unknown };
@@ -166,17 +219,27 @@ export function stripHarnessBoilerplate(raw: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
 
-    if (BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))) {
+    if (BOILERPLATE_SECTION_HEADER_PATTERNS.some((p) => p.test(trimmed))) {
       skippingBoilerplateSection = true;
       continue;
     }
 
+    if (BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))) {
+      continue;
+    }
+
     if (skippingBoilerplateSection) {
-      if (trimmed === "") {
+      if (trimmed.startsWith("#") && !BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))) {
         skippingBoilerplateSection = false;
       } else if (
-        trimmed.startsWith("#") &&
-        !BOILERPLATE_LINE_PATTERNS.some((p) => p.test(trimmed))
+        trimmed.startsWith("<") ||
+        trimmed.startsWith("[") ||
+        trimmed.startsWith("---") ||
+        trimmed.startsWith("===") ||
+        (!trimmed.startsWith("-") &&
+          !trimmed.startsWith("*") &&
+          !trimmed.startsWith("##") &&
+          /[가-힣]/.test(trimmed))
       ) {
         skippingBoilerplateSection = false;
       } else {
@@ -209,7 +272,13 @@ export function stripHarnessBoilerplate(raw: string): string {
       trimmed.startsWith("Never use git stash") ||
       trimmed.startsWith("As you answer the user's questions") ||
       trimmed.startsWith("No message from any agent is ever your user's consent") ||
-      trimmed.startsWith("You are powered by the model")
+      trimmed.startsWith("You are powered by the model") ||
+      trimmed.startsWith("You are an interactive agent") ||
+      trimmed.startsWith("x-anthropic-billing-header") ||
+      trimmed.startsWith("Security guidance") ||
+      trimmed.startsWith("Pronouns:") ||
+      trimmed.startsWith("Reversibility:") ||
+      trimmed.startsWith("You have a persistent file-based memory")
     ) {
       continue;
     }
