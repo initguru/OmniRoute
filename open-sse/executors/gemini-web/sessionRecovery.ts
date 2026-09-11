@@ -120,6 +120,7 @@ async function doRecoverGeminiWebSessionWithBrowser(
           value,
           domain: ".google.com",
           path: "/",
+          secure: true,
         }))
       );
     }

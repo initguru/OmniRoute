@@ -2,6 +2,7 @@ import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 import {
   GEMINI_DEEP_THINK_MODEL_ID,
   buildModelHeaders,
@@ -10,6 +11,7 @@ import {
   buildPollRequestBody,
   parsePollResponse,
   bootstrapGeminiWebSession,
+  isHeadersOverflowError,
 } from "../../open-sse/executors/gemini-web/directProtocol.ts";
 
 const fixturePath = fileURLToPath(
@@ -276,6 +278,104 @@ describe("Gemini Web Direct Protocol", () => {
           message: /Failed to extract Gemini Web session tokens/,
         }
       );
+    });
+
+    it("should safely fallback to https request with maxHeaderSize 65536 when HeadersOverflowError occurs", async () => {
+      const overflowErr = new Error("Headers Overflow");
+      overflowErr.name = "HeadersOverflowError";
+      (overflowErr as { code?: string }).code = "UND_ERR_HEADERS_OVERFLOW";
+
+      const mockFetch = mock.fn(async () => {
+        throw overflowErr;
+      });
+
+      const fallbackHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script>
+            window.WIZ_global_data = {
+              "SNlM0e": "fallback-at-token-12345",
+              "FdrFJe": "-1234567890987654321",
+              "cfb2h": "boq_assistant-bard-web-server_20260907.08_p0"
+            };
+          </script>
+        </head>
+        <body></body>
+        </html>
+      `;
+
+      let capturedOptions: Record<string, unknown> | undefined;
+      const mockHttpsRequest = mock.fn((_url: unknown, options: unknown, callback: unknown) => {
+        capturedOptions = options as Record<string, unknown>;
+        const cb = (typeof options === "function" ? options : callback) as (res: unknown) => void;
+        const req = new EventEmitter() as EventEmitter & { end: () => void; destroy: () => void };
+        req.end = mock.fn(() => {
+          const res = new EventEmitter() as EventEmitter & {
+            statusCode: number;
+            headers: Record<string, unknown>;
+          };
+          res.statusCode = 200;
+          res.headers = {
+            "content-type": "text/html",
+            "set-cookie": ["__Secure-1PSIDTS=fallback_rotated_ts; Domain=.google.com; Path=/"],
+          };
+          process.nextTick(() => {
+            cb(res);
+            res.emit("data", Buffer.from(fallbackHtml));
+            res.emit("end");
+          });
+        });
+        req.destroy = mock.fn();
+        return req;
+      });
+
+      const initialCookie = "__Secure-1PSID=orig_psid; __Secure-1PSIDTS=orig_ts";
+      const session = await bootstrapGeminiWebSession(initialCookie, undefined, {
+        fetchFn: mockFetch as unknown as typeof fetch,
+        httpsRequestFn: mockHttpsRequest as unknown as typeof import("node:https").request,
+      });
+
+      assert.equal(mockFetch.mock.callCount(), 1);
+      assert.equal(mockHttpsRequest.mock.callCount(), 1);
+      assert.equal(capturedOptions?.maxHeaderSize, 65536);
+      assert.equal(session.atToken, "fallback-at-token-12345");
+      assert.equal(session.fSid, "-1234567890987654321");
+      assert.equal(session.buildLabel, "boq_assistant-bard-web-server_20260907.08_p0");
+      assert.ok(session.mergedCookie?.includes("__Secure-1PSIDTS=fallback_rotated_ts"));
+      assert.ok(session.mergedCookie?.includes("__Secure-1PSID=orig_psid"));
+    });
+  });
+
+  describe("isHeadersOverflowError", () => {
+    it("should return true for HeadersOverflowError by name", () => {
+      const err = new Error("Headers overflow");
+      err.name = "HeadersOverflowError";
+      assert.equal(isHeadersOverflowError(err), true);
+    });
+
+    it("should return true for UND_ERR_HEADERS_OVERFLOW by code", () => {
+      const err = { code: "UND_ERR_HEADERS_OVERFLOW", message: "Failed" };
+      assert.equal(isHeadersOverflowError(err), true);
+    });
+
+    it("should return true when message contains overflow", () => {
+      const err = new Error("HTTP parse error: Headers Overflow (maxHeaderSize exceeded)");
+      assert.equal(isHeadersOverflowError(err), true);
+    });
+
+    it("should return true for wrapped error with cause", () => {
+      const cause = new Error("Headers overflow");
+      cause.name = "HeadersOverflowError";
+      const wrapper = new TypeError("fetch failed");
+      (wrapper as { cause?: unknown }).cause = cause;
+      assert.equal(isHeadersOverflowError(wrapper), true);
+    });
+
+    it("should return false for regular errors", () => {
+      assert.equal(isHeadersOverflowError(new Error("Connection refused")), false);
+      assert.equal(isHeadersOverflowError(null), false);
+      assert.equal(isHeadersOverflowError(undefined), false);
     });
   });
 });

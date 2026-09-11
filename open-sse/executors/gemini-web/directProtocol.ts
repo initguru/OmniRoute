@@ -6,6 +6,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
+import * as zlib from "node:zlib";
 import { parseCookies, mergeRotatedGeminiCookies } from "./cookieUtils.ts";
 
 export const GEMINI_DEEP_THINK_MODEL_ID = "797f3d0293f288ad";
@@ -45,6 +48,7 @@ export interface PollResponseResult {
 export interface BootstrapSessionOptions {
   timeoutMs?: number;
   fetchFn?: typeof fetch;
+  httpsRequestFn?: typeof https.request;
 }
 
 /**
@@ -373,6 +377,152 @@ export function createCombinedSignal(signal?: AbortSignal, timeoutMs = 15000): A
   return AbortSignal.any([signal, timeoutSignal]);
 }
 
+/**
+ * Detects whether an error was caused by HTTP header overflow (e.g. Node.js fetch default 16KB limit).
+ */
+export function isHeadersOverflowError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as {
+    name?: string;
+    code?: string;
+    message?: string;
+    cause?: unknown;
+  };
+  if (
+    anyErr.code === "UND_ERR_HEADERS_OVERFLOW" ||
+    anyErr.name === "HeadersOverflowError" ||
+    (typeof anyErr.message === "string" && /overflow/i.test(anyErr.message))
+  ) {
+    return true;
+  }
+  if (anyErr.cause) {
+    return isHeadersOverflowError(anyErr.cause);
+  }
+  return false;
+}
+
+export interface HttpsFallbackResult {
+  html: string;
+  url: string;
+  locationHeader?: string;
+  setCookieHeaders: string[];
+}
+
+/**
+ * Safe fallback using node:https request with maxHeaderSize: 65536 to handle large (~28KB) Google response headers.
+ */
+export function fetchWithHttpsFallback(
+  targetUrl: string,
+  cookie: string,
+  signal?: AbortSignal,
+  httpsRequestFn: typeof https.request = https.request,
+  maxRedirects = 5
+): Promise<HttpsFallbackResult> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Request aborted"));
+      return;
+    }
+
+    const collectedSetCookies: string[] = [];
+
+    function doRequest(currentUrl: string, redirectsRemaining: number) {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(currentUrl);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+
+      const transport = parsedUrl.protocol === "http:" ? http.request : httpsRequestFn;
+
+      const req = transport(
+        parsedUrl,
+        {
+          method: "GET",
+          headers: {
+            Cookie: cookie,
+            "User-Agent":
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+          },
+          maxHeaderSize: 65536,
+          signal,
+        },
+        (res) => {
+          const rawSetCookies = res.headers["set-cookie"];
+          if (Array.isArray(rawSetCookies)) {
+            collectedSetCookies.push(...rawSetCookies);
+          } else if (typeof rawSetCookies === "string") {
+            collectedSetCookies.push(rawSetCookies);
+          }
+
+          const statusCode = res.statusCode ?? 200;
+          const location = (res.headers["location"] as string) || "";
+
+          // Check redirect
+          if (statusCode >= 300 && statusCode < 400 && location) {
+            if (location.includes("accounts.google.com") || location.includes("ServiceLogin")) {
+              resolve({
+                html: "",
+                url: location,
+                locationHeader: location,
+                setCookieHeaders: collectedSetCookies,
+              });
+              return;
+            }
+
+            if (redirectsRemaining <= 0) {
+              reject(new Error("Too many redirects during Gemini Web session bootstrap fallback"));
+              return;
+            }
+
+            const nextUrl = new URL(location, currentUrl).toString();
+            doRequest(nextUrl, redirectsRemaining - 1);
+            return;
+          }
+
+          if (statusCode < 200 || statusCode >= 300) {
+            reject(new Error(`Failed to fetch Gemini Web session: HTTP ${statusCode}`));
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("error", (err: Error) => reject(err));
+          res.on("end", () => {
+            try {
+              let buffer = Buffer.concat(chunks);
+              const encoding = (res.headers["content-encoding"] || "").toLowerCase();
+              if (encoding === "gzip" || encoding === "deflate") {
+                buffer = zlib.unzipSync(buffer);
+              } else if (encoding === "br") {
+                buffer = zlib.brotliDecompressSync(buffer);
+              }
+              const html = buffer.toString("utf8");
+              resolve({
+                html,
+                url: currentUrl,
+                locationHeader: location,
+                setCookieHeaders: collectedSetCookies,
+              });
+            } catch (err) {
+              reject(err);
+            }
+          });
+        }
+      );
+
+      req.on("error", (err: Error) => reject(err));
+      req.end();
+    }
+
+    doRequest(targetUrl, maxRedirects);
+  });
+}
+
 export async function bootstrapGeminiWebSession(
   cookie: string,
   signal?: AbortSignal,
@@ -382,22 +532,52 @@ export async function bootstrapGeminiWebSession(
   const timeoutMs = options?.timeoutMs ?? 15000;
   const combinedSignal = createCombinedSignal(signal, timeoutMs);
 
-  const res = await fetchFn("https://gemini.google.com/app", {
-    headers: {
-      Cookie: cookie,
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-    signal: combinedSignal,
-  });
+  let html: string;
+  let responseUrl = "";
+  let locationHeader = "";
+  let setCookieHeaders: string[] = [];
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch Gemini Web session: HTTP ${res.status}`);
+  try {
+    const res = await fetchFn("https://gemini.google.com/app", {
+      headers: {
+        Cookie: cookie,
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: combinedSignal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch Gemini Web session: HTTP ${res.status}`);
+    }
+
+    responseUrl = res.url || "";
+    locationHeader = res.headers.get("location") || "";
+    html = await res.text();
+
+    const getSetCookie = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+    setCookieHeaders =
+      typeof getSetCookie === "function"
+        ? getSetCookie.call(res.headers)
+        : [res.headers.get("set-cookie")].filter((c): c is string => Boolean(c));
+  } catch (err) {
+    if (isHeadersOverflowError(err)) {
+      const fallbackResult = await fetchWithHttpsFallback(
+        "https://gemini.google.com/app",
+        cookie,
+        combinedSignal,
+        options?.httpsRequestFn ?? https.request
+      );
+      html = fallbackResult.html;
+      responseUrl = fallbackResult.url;
+      locationHeader = fallbackResult.locationHeader || "";
+      setCookieHeaders = fallbackResult.setCookieHeaders;
+    } else {
+      throw err;
+    }
   }
 
-  const responseUrl = res.url || "";
-  const locationHeader = res.headers.get("location") || "";
   if (
     responseUrl.includes("accounts.google.com") ||
     responseUrl.includes("ServiceLogin") ||
@@ -408,8 +588,6 @@ export async function bootstrapGeminiWebSession(
       "Failed to extract Gemini Web session tokens: redirected to login. Cookie may be expired or invalid."
     );
   }
-
-  const html = await res.text();
 
   const atToken =
     html.match(/"SNlM0e":\s*"([^"]+)"/)?.[1] || html.match(/"SNlM0e",\s*"([^"]+)"/)?.[1];
@@ -422,12 +600,6 @@ export async function bootstrapGeminiWebSession(
       "Failed to extract Gemini Web session tokens (SNlM0e/FdrFJe/cfb2h). Cookie may be expired or invalid."
     );
   }
-
-  const getSetCookie = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
-  const setCookieHeaders =
-    typeof getSetCookie === "function"
-      ? getSetCookie.call(res.headers)
-      : [res.headers.get("set-cookie")].filter((c): c is string => Boolean(c));
 
   let mergedCookie: string | undefined;
   if (setCookieHeaders.length > 0) {

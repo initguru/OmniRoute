@@ -30,5 +30,6 @@ pm2 delete omniroute-server >/dev/null 2>&1 || true
 pm2 start "${SERVER_ENTRY}" \
   --name omniroute-server \
   --cwd "${STANDALONE_ROOT}" \
-  --interpreter "${NODE_BIN}"
+  --interpreter "${NODE_BIN}" \
+  --node-args="--max-http-header-size=65536"
 pm2 save

@@ -83,10 +83,13 @@ describe("recoverGeminiWebSessionWithBrowser (Tier 2 self-healing)", () => {
       value: string;
       domain: string;
       path: string;
+      secure?: boolean;
     }>;
     assert.equal(addedCookies.length, 2);
     assert.equal(addedCookies[0].domain, ".google.com");
     assert.equal(addedCookies[0].path, "/");
+    assert.equal(addedCookies[0].secure, true);
+    assert.equal(addedCookies[1].secure, true);
   });
 
   it("shares the same single-flight promise for concurrent recovery calls with identical cookie", async () => {
