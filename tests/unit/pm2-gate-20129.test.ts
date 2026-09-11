@@ -62,6 +62,10 @@ describe("pm2_gate_20129.sh contract and behavior", () => {
 
     // Database snapshotting via sqlite3 online backup
     assert.ok(
+      content.includes('rm -f "${GATE_DATA_DIR}/storage.sqlite*"'),
+      "Must clean leftover sqlite files before backup"
+    );
+    assert.ok(
       content.includes("sqlite3") && content.includes(".backup"),
       "Must use sqlite3 online backup (.backup) for atomic snapshot"
     );
@@ -82,8 +86,8 @@ describe("pm2_gate_20129.sh contract and behavior", () => {
       "Must set OMNIROUTE_ENABLE_LIVE_WS=0"
     );
     assert.ok(
-      content.includes("OMNIROUTE_DISABLE_BACKGROUND_SERVICES=1"),
-      "Must disable background services (OMNIROUTE_DISABLE_BACKGROUND_SERVICES=1)"
+      content.includes("OMNIROUTE_DISABLE_BACKGROUND_SERVICES=true"),
+      "Must disable background services (OMNIROUTE_DISABLE_BACKGROUND_SERVICES=true)"
     );
     assert.ok(
       content.includes("OMNIROUTE_DISABLE_CREDENTIAL_HEALTH_CHECK=true"),

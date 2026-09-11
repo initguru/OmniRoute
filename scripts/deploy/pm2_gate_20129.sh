@@ -59,6 +59,7 @@ check_port_20129() {
 
 prepare_gate_data() {
   mkdir -p "${GATE_DATA_DIR}"
+  rm -f "${GATE_DATA_DIR}/storage.sqlite*"
 
   # Snapshot SQLite DB if exists
   if [[ -f "${PROD_DATA_DIR}/storage.sqlite" ]]; then
@@ -111,7 +112,7 @@ cmd_start() {
   OMNIROUTE_PUBLIC_BASE_URL="http://127.0.0.1:20129" \
   LIVE_WS_PORT=20133 \
   OMNIROUTE_ENABLE_LIVE_WS=0 \
-  OMNIROUTE_DISABLE_BACKGROUND_SERVICES=1 \
+  OMNIROUTE_DISABLE_BACKGROUND_SERVICES=true \
   OMNIROUTE_DISABLE_CREDENTIAL_HEALTH_CHECK=true \
   DISABLE_SQLITE_AUTO_BACKUP=true \
   OMNIROUTE_WAL_TRUNCATE_INTERVAL_MS=0 \
