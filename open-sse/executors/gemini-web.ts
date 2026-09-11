@@ -632,9 +632,10 @@ export class GeminiWebExecutor extends BaseExecutor {
         response: new Response(readable, {
           status: 200,
           headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
             Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
           },
         }),
         url: GEMINI_URL,
@@ -794,6 +795,213 @@ export class GeminiWebExecutor extends BaseExecutor {
 
       if (!envelope.isPending && envelope.initialText) {
         finalResponseText = envelope.initialText;
+      } else if (Boolean(stream)) {
+        // Early SSE Streaming with periodic keepalive pings during polling
+        const conversationId = envelope.conversationId;
+        const pollStartTime = Date.now();
+        const pollIntervalMs =
+          (credPsd as { pollIntervalMs?: number } | undefined)?.pollIntervalMs ??
+          (connPsd as { pollIntervalMs?: number } | undefined)?.pollIntervalMs ??
+          1500;
+        const keepaliveIntervalMs =
+          (credPsd as { keepaliveIntervalMs?: number } | undefined)?.keepaliveIntervalMs ??
+          (connPsd as { keepaliveIntervalMs?: number } | undefined)?.keepaliveIntervalMs ??
+          15000;
+
+        const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = writable.getWriter();
+        const encoder = new TextEncoder();
+
+        (async () => {
+          let abortedByClient = false;
+          const onAbort = () => {
+            abortedByClient = true;
+            try {
+              writer.abort(signal?.reason).catch(() => {});
+            } catch {
+              // ignore
+            }
+          };
+
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          signal?.addEventListener("abort", onAbort, { once: true });
+
+          try {
+            // Immediately send an initial keepalive ping frame
+            await writer.write(encoder.encode(": ping\n\n"));
+            let lastPingTime = Date.now();
+
+            while (true) {
+              if (signal?.aborted || abortedByClient) {
+                break;
+              }
+
+              const elapsedMs = Date.now() - pollStartTime;
+              if (elapsedMs >= timeoutMs) {
+                const timeoutMsg = sanitizeErrorMessage(
+                  `Gemini Deep Think timed out after ${timeoutMs}ms`
+                );
+                const errPayload = buildErrorBody(504, timeoutMsg, null, {
+                  type: "timeout_error",
+                  code: GEMINI_DEEP_THINK_TIMEOUT_CODE,
+                });
+                await writer.write(encoder.encode(`data: ${JSON.stringify(errPayload)}\n\n`));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                break;
+              }
+
+              const remainingTime = timeoutMs - elapsedMs;
+              const sleepTime = Math.min(pollIntervalMs, remainingTime);
+              await sleepWithSignal(sleepTime, signal ?? undefined);
+
+              if (signal?.aborted || abortedByClient) {
+                break;
+              }
+
+              const now = Date.now();
+              if (now - lastPingTime >= Math.min(pollIntervalMs, keepaliveIntervalMs)) {
+                await writer.write(encoder.encode(": ping\n\n"));
+                lastPingTime = now;
+              }
+
+              const pollReqId = Math.floor(Math.random() * 900000) + 100000;
+              const pollUrl = `https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=hNvQHb&source-path=%2Fapp%2F${encodeURIComponent(conversationId)}&bl=${encodeURIComponent(buildLabel)}&f.sid=${encodeURIComponent(fSid)}&hl=en&_reqid=${pollReqId}&rt=c`;
+
+              const pollParams = buildPollRequestBody(conversationId, atToken);
+              const pollHeaders: Record<string, string> = {
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                Cookie: cookie,
+                "x-same-domain": "1",
+              };
+
+              const pollResp = await fetchFn(pollUrl, {
+                method: "POST",
+                headers: pollHeaders,
+                body: pollParams.toString(),
+                signal: signal ?? undefined,
+              });
+
+              if (!pollResp.ok) {
+                if (pollResp.status === 401 || pollResp.status === 403) {
+                  clearCachedSession(cookie);
+                  const errPayload = buildErrorBody(
+                    401,
+                    sanitizeErrorMessage(`Gemini poll session expired: HTTP ${pollResp.status}`),
+                    null,
+                    {
+                      type: "authentication_error",
+                      code: "gemini_web_auth_required",
+                    }
+                  );
+                  await writer.write(encoder.encode(`data: ${JSON.stringify(errPayload)}\n\n`));
+                  await writer.write(encoder.encode("data: [DONE]\n\n"));
+                  break;
+                }
+                continue;
+              }
+
+              await this.persistRotatedCookiesFromHeaders(
+                pollResp.headers,
+                cookie,
+                credentials,
+                onCredentialsRefreshed,
+                log
+              );
+
+              const pollRawText = await pollResp.text();
+              const pollResult = parsePollResponse(pollRawText);
+
+              if (pollResult.isFailed) {
+                const errPayload = buildErrorBody(
+                  502,
+                  sanitizeErrorMessage(pollResult.error || "Gemini Deep Think generation failed"),
+                  null,
+                  {
+                    type: "server_error",
+                    code: "gemini_deep_think_generation_failed",
+                  }
+                );
+                await writer.write(encoder.encode(`data: ${JSON.stringify(errPayload)}\n\n`));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                break;
+              }
+
+              if (!pollResult.isPending && pollResult.text) {
+                const text = pollResult.text;
+                if (hasTools) {
+                  const cid = `chatcmpl-gwe-${crypto.randomUUID().slice(0, 12)}`;
+                  const created = Math.floor(Date.now() / 1000);
+                  const toolResponse = await buildGeminiToolResponse(
+                    text,
+                    requestedTools,
+                    true,
+                    modelId,
+                    cid,
+                    created
+                  );
+                  if (toolResponse.body) {
+                    const toolReader = toolResponse.body.getReader();
+                    while (true) {
+                      const { done, value } = await toolReader.read();
+                      if (done) break;
+                      await writer.write(value);
+                    }
+                  }
+                } else {
+                  await writer.write(
+                    encoder.encode(`data: ${JSON.stringify(formatStreamChunk(text, modelId))}\n\n`)
+                  );
+                  await writer.write(
+                    encoder.encode(
+                      `data: ${JSON.stringify(formatStreamChunk("", modelId, "stop"))}\n\n`
+                    )
+                  );
+                  await writer.write(encoder.encode("data: [DONE]\n\n"));
+                }
+                break;
+              }
+            }
+          } catch (err) {
+            if (!signal?.aborted && !abortedByClient) {
+              try {
+                const msg = sanitizeErrorMessage(err instanceof Error ? err.message : String(err));
+                const errPayload = buildErrorBody(500, msg, null, {
+                  type: "server_error",
+                  code: "gemini_deep_think_streaming_error",
+                });
+                await writer.write(encoder.encode(`data: ${JSON.stringify(errPayload)}\n\n`));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+              } catch {
+                // ignore
+              }
+            }
+          } finally {
+            signal?.removeEventListener("abort", onAbort);
+            try {
+              await writer.close();
+            } catch {
+              // ignore
+            }
+          }
+        })();
+
+        return {
+          response: new Response(readable, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              Connection: "keep-alive",
+              "X-Accel-Buffering": "no",
+            },
+          }),
+          url: GEMINI_URL,
+          headers: {},
+          transformedBody: body,
+        };
       } else {
         // 3. Polling loop for hNvQHb
         const conversationId = envelope.conversationId;
