@@ -2520,7 +2520,11 @@ export async function handleChatCore({
       // into the client body BEFORE translation so their user-merge /
       // relocation paths carry the global prompt (baseline coverage of the
       // removed pre-translation pass). The gate writes ONE carrier only.
-      translatedBody = injectSystemPromptPreTranslation(translatedBody, { targetFormat });
+      translatedBody = injectSystemPromptPreTranslation(translatedBody, {
+        targetFormat,
+        provider,
+        model,
+      });
       translatedBody = translateRequest(
         sourceFormat,
         targetFormat,
@@ -3116,7 +3120,11 @@ export async function handleChatCore({
       // `systemInstruction`, responses `instructions`. Carrier-less targets
       // (kiro user-fold, antigravity Cloud Code envelope) are covered by the
       // gated PRE-translation pass before translateRequest instead.
-      bodyToSend = injectSystemPromptPostTranslation(bodyToSend, { targetFormat });
+      bodyToSend = injectSystemPromptPostTranslation(bodyToSend, {
+        targetFormat,
+        provider,
+        model: modelToCall,
+      });
 
       updatePendingScope(pendingScope, {
         providerRequest: bodyToSend,

@@ -76,6 +76,41 @@ export function getSystemPromptConfig() {
 }
 
 /**
+ * Determines whether the global system prompt (prefixPrompt / suffixPrompt)
+ * should be injected for the given provider and model.
+ *
+ * For Gemini Web Deep Think (`gemini-deep-think`), the global CLI harness system
+ * prompt interferes with deep reasoning and must be bypassed.
+ *
+ * @param opts - Target execution options ({ provider, model })
+ * @returns boolean - false if global prompt should be bypassed, true otherwise
+ */
+export function shouldInjectGlobalSystemPrompt(opts?: {
+  provider?: string;
+  model?: string;
+}): boolean {
+  if (!opts) return true;
+  const rawProvider = (opts.provider || "").trim().toLowerCase();
+  const rawModel = (opts.model || "").trim().toLowerCase();
+
+  const isGeminiWeb =
+    rawProvider === "gemini-web" ||
+    rawProvider === "gweb" ||
+    rawModel.startsWith("gemini-web/") ||
+    rawModel.startsWith("gweb/") ||
+    (rawProvider === "" && rawModel.includes("gemini-deep-think"));
+
+  if (isGeminiWeb) {
+    const modelWithoutPrefix = rawModel.replace(/^(?:gweb|gemini-web)\//, "");
+    if (modelWithoutPrefix === "gemini-deep-think" || modelWithoutPrefix.includes("deep-think")) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * Inject system prompts into request body.
  *
  * prefixPrompt is prepended before existing system content.
@@ -83,9 +118,11 @@ export function getSystemPromptConfig() {
  * This ensures: prefix → agent instructions → suffix (#2468).
  *
  * @param body - Request body
+ * @param opts - Optional target execution options ({ provider, model })
  * @returns Modified body
  */
-export function injectSystemPrompt<T>(body: T): T {
+export function injectSystemPrompt<T>(body: T, opts?: { provider?: string; model?: string }): T {
+  if (!shouldInjectGlobalSystemPrompt(opts)) return body;
   const cfg = getConfig();
   if (!cfg.enabled) return body;
   const prefix = cfg.prefixPrompt || "";
@@ -203,8 +240,9 @@ function markInjected(body: Record<string, unknown>): void {
  */
 export function injectSystemPromptPostTranslation(
   body: any,
-  opts?: { targetFormat?: string }
+  opts?: { targetFormat?: string; provider?: string; model?: string }
 ): any {
+  if (!shouldInjectGlobalSystemPrompt(opts)) return body;
   const cfg = getConfig();
   if (!cfg.enabled) return body;
   const prefix = cfg.prefixPrompt || "";
@@ -357,8 +395,9 @@ export function injectSystemPromptPostTranslation(
  */
 export function injectSystemPromptPreTranslation(
   body: any,
-  opts?: { targetFormat?: string }
+  opts?: { targetFormat?: string; provider?: string; model?: string }
 ): any {
+  if (!shouldInjectGlobalSystemPrompt(opts)) return body;
   const cfg = getConfig();
   if (!cfg.enabled) return body;
   const prefix = cfg.prefixPrompt || "";

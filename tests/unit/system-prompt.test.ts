@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 const {
   injectSystemPrompt,
   injectSystemPromptPostTranslation,
+  injectSystemPromptPreTranslation,
+  shouldInjectGlobalSystemPrompt,
   setSystemPromptConfig,
   getSystemPromptConfig,
 } = await import("../../open-sse/services/systemPrompt.ts");
@@ -289,6 +291,62 @@ test("postTranslation: codex regression — suffix lands on LAST developer after
   assert.ok(lastSys.content.trimEnd().endsWith("AFTER-PROMPT-MARKER"));
   // the first system must NOT carry the suffix
   assert.ok(!result.messages[0].content.includes("AFTER-PROMPT-MARKER"));
+});
+
+// ─── Gemini Web Deep Think Bypass Policy ─────────────────────────────────────
+
+test("shouldInjectGlobalSystemPrompt: policy gates gemini-web deep-think models", () => {
+  assert.equal(
+    shouldInjectGlobalSystemPrompt({ provider: "gemini-web", model: "gemini-deep-think" }),
+    false
+  );
+  assert.equal(
+    shouldInjectGlobalSystemPrompt({ provider: "gemini-web", model: "gemini-2.5-flash" }),
+    true
+  );
+  assert.equal(shouldInjectGlobalSystemPrompt({ provider: "openai", model: "gpt-4o" }), true);
+});
+
+test("injectSystemPromptPostTranslation: bypasses gemini-web deep-think", () => {
+  setSystemPromptConfig({ enabled: true, prefixPrompt: "PRE", suffixPrompt: "SUF" });
+  const body = {
+    messages: [
+      { role: "system", content: "Original prompt" },
+      { role: "user", content: "hi" },
+    ],
+  };
+  const bypassed = injectSystemPromptPostTranslation(body, {
+    targetFormat: "openai",
+    provider: "gemini-web",
+    model: "gemini-deep-think",
+  });
+  assert.deepEqual(bypassed, body);
+  assert.equal(bypassed.messages[0].content, "Original prompt");
+
+  const injected = injectSystemPromptPostTranslation(body, {
+    targetFormat: "openai",
+    provider: "openai",
+    model: "gpt-4o",
+  });
+  assert.ok(injected.messages[0].content.startsWith("PRE"));
+  assert.ok(injected.messages[0].content.includes("Original prompt"));
+  assert.ok(injected.messages[0].content.trimEnd().endsWith("SUF"));
+});
+
+test("injectSystemPromptPreTranslation: bypasses gemini-web deep-think on carrier-less target", () => {
+  setSystemPromptConfig({ enabled: true, prefixPrompt: "PRE", suffixPrompt: "SUF" });
+  const body = {
+    messages: [
+      { role: "system", content: "Original prompt" },
+      { role: "user", content: "hi" },
+    ],
+  };
+  const bypassed = injectSystemPromptPreTranslation(body, {
+    targetFormat: "antigravity",
+    provider: "gemini-web",
+    model: "gemini-deep-think",
+  });
+  assert.deepEqual(bypassed, body);
 });
 
 // Reset
