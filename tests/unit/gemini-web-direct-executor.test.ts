@@ -311,6 +311,116 @@ describe("GeminiWebExecutor Direct API (gemini-deep-think)", () => {
     assert.equal(json.error.type, "authentication_error");
   });
 
+  it("recovers via Tier 2 browser self-healing when session bootstrap fails and completes request", async () => {
+    const urlsCalled: string[] = [];
+    const mockFetch = mock.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      urlsCalled.push(url);
+
+      if (url.includes("/app")) {
+        // Direct bootstrap fails (e.g. login redirect or no tokens)
+        return new Response("<html><body>Sign in to Google</body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+
+      if (url.includes("StreamGenerate")) {
+        return new Response(fixture.streamGenerateInitialResponse, {
+          status: 200,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+        });
+      }
+
+      if (url.includes("batchexecute") && url.includes("hNvQHb")) {
+        return new Response(fixture.pollCompletedResponse, {
+          status: 200,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+        });
+      }
+
+      return new Response("Not found", { status: 404 });
+    });
+
+    const mockPage = {
+      goto: mock.fn(async () => {}),
+      url: mock.fn(() => "https://gemini.google.com/app"),
+      evaluate: mock.fn(async () => ({
+        SNlM0e: "recovered-at-token",
+        FdrFJe: "recovered-fsid",
+        cfb2h: "boq_assistant-bard-web-server_20260907.07_p0",
+      })),
+      waitForSelector: mock.fn(async () => {}),
+      close: mock.fn(async () => {}),
+    };
+
+    const mockContext = {
+      addCookies: mock.fn(async () => {}),
+      newPage: mock.fn(async () => mockPage),
+      cookies: mock.fn(async () => [{ name: "__Secure-1PSIDTS", value: "recovered-rotated-ts" }]),
+      close: mock.fn(async () => {}),
+    };
+
+    const mockBrowser = {
+      newContext: mock.fn(async () => mockContext),
+      close: mock.fn(async () => {}),
+    };
+
+    const mockPlaywright = {
+      chromium: {
+        launch: mock.fn(async () => mockBrowser),
+      },
+    };
+
+    let refreshedCredentials: Record<string, unknown> | null = null;
+    const executor = new GeminiWebExecutor();
+    const result = await executor.execute({
+      model: "gemini-deep-think",
+      body: {
+        messages: [{ role: "user", content: "Self healing test" }],
+        stream: false,
+      },
+      stream: false,
+      credentials: {
+        apiKey: "__Secure-1PSID=test-sid; __Secure-1PSIDTS=stale-ts",
+        providerSpecificData: { pollIntervalMs: 5 },
+      },
+      signal: AbortSignal.timeout(10000),
+      log: null,
+      fetch: mockFetch as unknown as typeof fetch,
+      playwright: mockPlaywright,
+      onCredentialsRefreshed: async (creds) => {
+        refreshedCredentials = creds;
+      },
+    } as unknown as ExecuteInput);
+
+    assert.equal(result.response.status, 200);
+    const json = (await result.response.json()) as CompletionResponseShape;
+    assert.equal(json.choices[0].message.content, "Paris");
+
+    assert.equal(
+      mockPlaywright.chromium.launch.mock.callCount(),
+      1,
+      "Must have launched browser for recovery"
+    );
+    assert.ok(
+      urlsCalled.some((u) => u.includes("StreamGenerate")),
+      "Must post to StreamGenerate after recovery"
+    );
+    assert.ok(
+      urlsCalled.some((u) => u.includes("batchexecute")),
+      "Must poll via batchexecute after recovery"
+    );
+    assert.ok(refreshedCredentials !== null, "Must have refreshed credentials with rotated cookie");
+    assert.ok(
+      String((refreshedCredentials as Record<string, unknown> | null)?.apiKey).includes(
+        "__Secure-1PSIDTS=recovered-rotated-ts"
+      ),
+      "Must have merged recovered rotated __Secure-1PSIDTS"
+    );
+  });
+
   it("handles upstream polling failure returning 502 gemini_deep_think_generation_failed", async () => {
     const mockFetch = mock.fn(async (input: RequestInfo | URL) => {
       const url =

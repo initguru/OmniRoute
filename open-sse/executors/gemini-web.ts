@@ -36,8 +36,10 @@ import {
   type GeminiWebSessionTokens,
 } from "./gemini-web/directProtocol.ts";
 import { parseCookies, mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
+import { recoverGeminiWebSessionWithBrowser } from "./gemini-web/sessionRecovery.ts";
 
 export { mergeRotatedGeminiCookies } from "./gemini-web/cookieUtils.ts";
+export { recoverGeminiWebSessionWithBrowser } from "./gemini-web/sessionRecovery.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -655,24 +657,52 @@ export class GeminiWebExecutor extends BaseExecutor {
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          log?.warn?.("GEMINI-WEB", `Failed to bootstrap Gemini Web session: ${msg}`);
-          return {
-            response: new Response(
-              JSON.stringify(
-                buildErrorBody(401, sanitizeErrorMessage(msg), null, {
-                  type: "authentication_error",
-                  code: "gemini_web_auth_required",
-                })
+          log?.warn?.(
+            "GEMINI-WEB",
+            `Direct bootstrap failed: ${msg}. Attempting Tier 2 browser self-healing recovery...`
+          );
+          const recovery = await recoverGeminiWebSessionWithBrowser({
+            cookie,
+            credentials: credentials as Record<string, unknown> | undefined,
+            onCredentialsRefreshed,
+            log: log ?? undefined,
+            signal: signal ?? undefined,
+            timeoutMs: Math.min(timeoutMs, 25000),
+            playwright: (input as { playwright?: unknown }).playwright,
+          });
+          if (recovery.success && recovery.tokens) {
+            sessionTokens = recovery.tokens;
+            if (recovery.mergedCookie && recovery.mergedCookie !== cookie) {
+              const oldCookie = cookie;
+              cookie = recovery.mergedCookie;
+              setCachedSession(cookie, sessionTokens);
+              setCachedSession(oldCookie, sessionTokens);
+            } else {
+              setCachedSession(cookie, sessionTokens);
+            }
+            log?.info?.(
+              "GEMINI-WEB",
+              "Tier 2 browser self-healing recovery succeeded; proceeding with Direct API request."
+            );
+          } else {
+            return {
+              response: new Response(
+                JSON.stringify(
+                  buildErrorBody(401, sanitizeErrorMessage(msg), null, {
+                    type: "authentication_error",
+                    code: "gemini_web_auth_required",
+                  })
+                ),
+                {
+                  status: 401,
+                  headers: { "Content-Type": "application/json" },
+                }
               ),
-              {
-                status: 401,
-                headers: { "Content-Type": "application/json" },
-              }
-            ),
-            url: GEMINI_URL,
-            headers: {},
-            transformedBody: body,
-          };
+              url: GEMINI_URL,
+              headers: {},
+              transformedBody: body,
+            };
+          }
         }
       }
 
