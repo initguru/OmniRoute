@@ -1,7 +1,36 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { resolvePublicCred } from "../../open-sse/utils/publicCreds.ts";
 import {
+  installAdobeTestContainment,
+  type AdobeTestContainmentHandle,
+} from "../helpers/adobeTestContainment.ts";
+
+const containment: AdobeTestContainmentHandle = installAdobeTestContainment({
+  optOutBrowserRefresh: true,
+});
+
+test.after(async () => {
+  try {
+    const { closeCallLogSaves } = await import("../../src/lib/usage/callLogs.ts");
+    await closeCallLogSaves(0);
+  } catch {
+    /* ignore */
+  }
+  try {
+    const core = await import("../../src/lib/db/core.ts");
+    core.resetDbInstance();
+  } catch {
+    /* ignore */
+  }
+  try {
+    containment.assertNoForbiddenAttempts("adobe-firefly.test.ts");
+  } finally {
+    containment.restore();
+  }
+});
+
+const { resolvePublicCred } = await import("../../open-sse/utils/publicCreds.ts");
+const {
   ADOBE_FIREFLY_IMAGE_MODELS,
   ADOBE_FIREFLY_VIDEO_MODELS,
   adobeFireflyApiKey,
@@ -37,23 +66,20 @@ import {
   extractAdobeArpSessionId,
   resolveAdobeAccessToken,
   ADOBE_FIREFLY_IMAGE_UPLOAD_URL,
-} from "../../open-sse/services/adobeFireflyClient.ts";
-import {
-  ADOBE_FIREFLY_FALLBACK_MODELS,
-  getAdobeFireflyFallbackCatalog,
-  mapDiscoveredToCatalog,
-} from "../../open-sse/services/adobeFireflyModels.ts";
-import {
-  buildAdobeFireflyCreditsQuota,
-  buildAdobeFireflyQuotasRecord,
-} from "../../open-sse/services/usage/adobeFirefly.ts";
-import { USAGE_SUPPORTED_PROVIDERS } from "../../src/shared/constants/providers.ts";
-import { handleAdobeFireflyImageGeneration } from "../../open-sse/handlers/imageGeneration/providers/adobeFirefly.ts";
-import { handleAdobeFireflyVideoGeneration } from "../../open-sse/handlers/videoGeneration/adobeFireflyHandler.ts";
-import { WEB_COOKIE_PROVIDERS } from "../../src/shared/constants/providers/web-cookie.ts";
-import { IMAGE_PROVIDERS } from "../../open-sse/config/imageRegistry.ts";
-import { VIDEO_PROVIDERS } from "../../open-sse/config/videoRegistry.ts";
-import { getExecutor } from "../../open-sse/executors/index.ts";
+} = await import("../../open-sse/services/adobeFireflyClient.ts");
+const { ADOBE_FIREFLY_FALLBACK_MODELS, getAdobeFireflyFallbackCatalog, mapDiscoveredToCatalog } =
+  await import("../../open-sse/services/adobeFireflyModels.ts");
+const { buildAdobeFireflyCreditsQuota, buildAdobeFireflyQuotasRecord } =
+  await import("../../open-sse/services/usage/adobeFirefly.ts");
+const { USAGE_SUPPORTED_PROVIDERS } = await import("../../src/shared/constants/providers.ts");
+const { handleAdobeFireflyImageGeneration } =
+  await import("../../open-sse/handlers/imageGeneration/providers/adobeFirefly.ts");
+const { handleAdobeFireflyVideoGeneration } =
+  await import("../../open-sse/handlers/videoGeneration/adobeFireflyHandler.ts");
+const { WEB_COOKIE_PROVIDERS } = await import("../../src/shared/constants/providers/web-cookie.ts");
+const { IMAGE_PROVIDERS } = await import("../../open-sse/config/imageRegistry.ts");
+const { VIDEO_PROVIDERS } = await import("../../open-sse/config/videoRegistry.ts");
+const { getExecutor } = await import("../../open-sse/executors/index.ts");
 
 // --- Registry --------------------------------------------------------------
 
