@@ -728,11 +728,111 @@ function sanitizeTurnText(text: string): string {
 }
 
 export function purifyDeepThinkPrompt(
-  messages: Array<{ role: string; content: unknown }>,
-  system?: unknown
+  messages: Array<{ role: string; content: unknown; tool_calls?: unknown }>,
+  system?: unknown,
+  extraDocs?: Array<string | { filePath?: string; content?: string }>
 ): PurifiedPromptResult {
   const extractedDocs: string[] = [];
   const systemParts: string[] = [];
+
+  // Map native assistant tool calls
+  const toolCallMap = new Map<string, { toolName: string; filePath: string }>();
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      if (Array.isArray(msg.content)) {
+        for (const item of msg.content) {
+          if (item && typeof item === "object" && (item as { type?: string }).type === "tool_use") {
+            const tu = item as { id?: string; name?: string; input?: Record<string, unknown> };
+            if (tu.id) {
+              const filePath = String(tu.input?.file_path || tu.input?.path || "");
+              toolCallMap.set(tu.id, { toolName: tu.name || "Read", filePath });
+            }
+          }
+        }
+      }
+      if (Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls as Array<{
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>) {
+          if (tc && tc.id) {
+            let parsedArgs: Record<string, unknown> = {};
+            try {
+              parsedArgs = JSON.parse(tc.function?.arguments || "{}");
+            } catch {}
+            const filePath = String(parsedArgs.file_path || parsedArgs.path || "");
+            toolCallMap.set(tc.id, { toolName: tc.function?.name || "Read", filePath });
+          }
+        }
+      }
+    }
+  }
+
+  // Extract native tool results from user turns and tool messages
+  for (const msg of messages) {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      for (const item of msg.content) {
+        if (
+          item &&
+          typeof item === "object" &&
+          (item as { type?: string }).type === "tool_result"
+        ) {
+          const tr = item as { tool_use_id?: string; content?: unknown; is_error?: boolean };
+          if (!tr.is_error && tr.tool_use_id) {
+            const tcInfo = toolCallMap.get(tr.tool_use_id);
+            let rawContent = "";
+            if (typeof tr.content === "string") {
+              rawContent = tr.content;
+            } else if (Array.isArray(tr.content)) {
+              rawContent = tr.content
+                .map((c) => (typeof c === "string" ? c : (c as { text?: string })?.text || ""))
+                .join("\n");
+            }
+            if (rawContent.trim()) {
+              const stripped = stripLineNumbers(rawContent).trim();
+              const filePath = tcInfo?.filePath || "";
+              const docHeader = filePath ? `[참조 문서: ${filePath}]` : "[참조 문서: Read tool]";
+              addExtractedDoc(extractedDocs, `${docHeader}\n${stripped}`);
+            }
+          }
+        }
+      }
+    }
+    if (msg.role === "tool") {
+      const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+      if (tcId) {
+        const tcInfo = toolCallMap.get(tcId);
+        let rawContent = "";
+        if (typeof msg.content === "string") {
+          rawContent = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          rawContent = msg.content
+            .map((c) => (typeof c === "string" ? c : (c as { text?: string })?.text || ""))
+            .join("\n");
+        }
+        if (rawContent.trim()) {
+          const stripped = stripLineNumbers(rawContent).trim();
+          const filePath = tcInfo?.filePath || "";
+          const docHeader = filePath ? `[참조 문서: ${filePath}]` : "[참조 문서: Read tool]";
+          addExtractedDoc(extractedDocs, `${docHeader}\n${stripped}`);
+        }
+      }
+    }
+  }
+
+  // Add any explicitly provided extra preflight documents
+  if (Array.isArray(extraDocs)) {
+    for (const doc of extraDocs) {
+      if (typeof doc === "string" && doc.trim()) {
+        addExtractedDoc(extractedDocs, doc.trim());
+      } else if (doc && typeof doc === "object" && "content" in doc) {
+        const d = doc as { filePath?: string; content?: string };
+        const stripped = stripLineNumbers(d.content || "").trim();
+        const docHeader = d.filePath ? `[참조 문서: ${d.filePath}]` : "[참조 문서: document]";
+        addExtractedDoc(extractedDocs, `${docHeader}\n${stripped}`);
+      }
+    }
+  }
 
   function processSystemItem(item: unknown): void {
     const text = extractMessageText(item);
@@ -769,7 +869,7 @@ export function purifyDeepThinkPrompt(
 
   const sanitizedSystem = systemParts.join("\n\n");
 
-  const nonSystemMessages = messages.filter((m) => m.role !== "system");
+  const nonSystemMessages = messages.filter((m) => m.role !== "system" && m.role !== "tool");
   const textMessages = nonSystemMessages.map((m) => ({
     role: m.role,
     content: extractMessageText(m.content),

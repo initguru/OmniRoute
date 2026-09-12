@@ -1282,7 +1282,13 @@ export class GeminiWebExecutor extends BaseExecutor {
     if (isDeepThinkModel(modelId) && !useBrowserAutomation) {
       hasTools = false;
       requestedTools = undefined;
-      const purified = purifyDeepThinkPrompt(messages, (body as { system?: unknown })?.system);
+      const preflightDocs = (body as Record<string, unknown>)?._deepThinkPreflightDocs as
+        Array<{ filePath?: string; content?: string }> | undefined;
+      const purified = purifyDeepThinkPrompt(
+        messages,
+        (body as { system?: unknown })?.system,
+        preflightDocs
+      );
       prompt = purified.prompt;
     } else {
       const toolPrep = prepareToolMessages(body as Record<string, unknown>, messages);

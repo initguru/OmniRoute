@@ -1025,7 +1025,15 @@ async function handleChatImplementation(
       if (isComboLiveTest) return true;
       // #12886: combo-name allow-list must not skip inner targets (#9057 still
       // checks auto/* / disableNonPublic via comboTargetPassesKeyModelPolicy).
-      if (!(await comboTargetPassesKeyModelPolicy({ apiKey, apiKeyInfo, requestedModelStr: resolvedModelStr, targetModelStr: modelString, isModelAllowedForKey }))) {
+      if (
+        !(await comboTargetPassesKeyModelPolicy({
+          apiKey,
+          apiKeyInfo,
+          requestedModelStr: resolvedModelStr,
+          targetModelStr: modelString,
+          isModelAllowedForKey,
+        }))
+      ) {
         return false;
       }
 
@@ -1614,6 +1622,31 @@ async function handleSingleModelChat(
     : hasForcedConnection && !isAgentBridgeRoutingContext
       ? "fixed combo step connection"
       : undefined;
+
+  // Deep Think @file synthetic client Read tool loop
+  if (
+    !isCombo &&
+    !isAgentBridgeRoutingContext &&
+    !runtimeOptions?.managedLease &&
+    provider === "gemini-web"
+  ) {
+    const { handleDeepThinkAttachmentPreflight } =
+      await import("./deepThinkAttachmentPreflight.ts");
+    const preflight = await handleDeepThinkAttachmentPreflight({
+      body,
+      provider,
+      model,
+      sourceFormat,
+      endpoint: clientRawRequest?.endpoint,
+      stream: Boolean(body?.stream),
+      headers: clientRawRequest?.headers,
+      runtimeOptions,
+      apiKeyInfo,
+    });
+    if (preflight.handled && preflight.response) {
+      return preflight.response;
+    }
+  }
 
   // 2. Local pressure precedes availability/breaker gates and account selection.
   const pressureGuard = checkResourcePressureBeforeProviderWork();
