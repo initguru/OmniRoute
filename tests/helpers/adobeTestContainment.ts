@@ -1,7 +1,9 @@
 import cp from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import path from "node:path";
 import tls from "node:tls";
 import { syncBuiltinESMExports } from "node:module";
 
@@ -30,11 +32,18 @@ export interface AdobeTestContainmentOptions {
    * and restores previous value on restore().
    */
   optOutBrowserRefresh?: boolean;
+  /**
+   * Automatically sets up a host-independent synthetic browser executable fixture
+   * via OMNIROUTE_LOGIN_BROWSER_PATH in _artifacts to prevent host OS Chrome/Edge discovery.
+   * Defaults to true.
+   */
+  setupSyntheticBrowser?: boolean;
 }
 
 export interface AdobeTestContainmentHandle {
   counts: ContainmentCounts;
   attempts: ForbiddenAttempt[];
+  syntheticBrowserPath?: string;
   getCounts(): ContainmentCounts;
   assertNoForbiddenAttempts(context?: string): void;
   restore(): void;
@@ -120,6 +129,32 @@ export function installAdobeTestContainment(
     originalBrowserRefreshEnv = process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
     process.env.ADOBE_FIREFLY_BROWSER_REFRESH = "0";
     didChangeBrowserRefreshEnv = true;
+  }
+
+  // Host-independent synthetic browser discovery fixture tracking
+  const shouldSetupSyntheticBrowser = options?.setupSyntheticBrowser !== false;
+  let originalBrowserPathEnv: string | undefined = undefined;
+  let didChangeBrowserPathEnv = false;
+  let syntheticBrowserPath: string | undefined = undefined;
+  let createdSyntheticFile = false;
+
+  if (shouldSetupSyntheticBrowser) {
+    originalBrowserPathEnv = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+    const artifactsDir = path.resolve(process.cwd(), "_artifacts");
+    try {
+      fs.mkdirSync(artifactsDir, { recursive: true });
+      syntheticBrowserPath = path.join(artifactsDir, "synthetic-adobe-browser.dummy");
+      if (!fs.existsSync(syntheticBrowserPath)) {
+        fs.writeFileSync(syntheticBrowserPath, "# dummy non-executable browser fixture\n", {
+          mode: 0o644,
+        });
+        createdSyntheticFile = true;
+      }
+      process.env.OMNIROUTE_LOGIN_BROWSER_PATH = syntheticBrowserPath;
+      didChangeBrowserPathEnv = true;
+    } catch {
+      // Best-effort fallback if directory creation fails
+    }
   }
 
   // 1. child_process trap
@@ -255,12 +290,30 @@ export function installAdobeTestContainment(
       globalThis.fetch = originalFetch;
     }
 
-    // Restore environment variable
+    // Restore environment variable for browser refresh
     if (didChangeBrowserRefreshEnv) {
       if (originalBrowserRefreshEnv !== undefined) {
         process.env.ADOBE_FIREFLY_BROWSER_REFRESH = originalBrowserRefreshEnv;
       } else {
         delete process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
+      }
+    }
+
+    // Restore environment variable and synthetic browser fixture
+    if (didChangeBrowserPathEnv) {
+      if (originalBrowserPathEnv !== undefined) {
+        process.env.OMNIROUTE_LOGIN_BROWSER_PATH = originalBrowserPathEnv;
+      } else {
+        delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+      }
+      if (createdSyntheticFile && syntheticBrowserPath) {
+        try {
+          if (fs.existsSync(syntheticBrowserPath)) {
+            fs.unlinkSync(syntheticBrowserPath);
+          }
+        } catch {
+          /* best-effort */
+        }
       }
     }
   }
@@ -282,6 +335,7 @@ export function installAdobeTestContainment(
   return {
     counts,
     attempts,
+    syntheticBrowserPath,
     getCounts: () => ({ ...counts }),
     assertNoForbiddenAttempts,
     restore,

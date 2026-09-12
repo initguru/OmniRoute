@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { kill } from "node:process";
 import cp, {
   spawn,
   spawnSync,
@@ -240,6 +242,59 @@ test("adobe test containment preflight - blocks all forbidden delegate calls and
           process.env.ADOBE_FIREFLY_BROWSER_REFRESH = prevEnv;
         } else {
           delete process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
+        }
+      }
+    }
+  );
+
+  await t.test(
+    "named node:process kill is trapped after syncBuiltinESMExports and restored reliably",
+    () => {
+      const origProcessKill = process.kill;
+      containment = installAdobeTestContainment();
+
+      // named kill from node:process must hit the trap due to syncBuiltinESMExports
+      assert.throws(() => {
+        kill(process.pid, 0);
+      }, /Forbidden process\.kill/);
+
+      const counts = containment.getCounts();
+      assert.equal(counts.processKill, 1);
+      assert.equal(counts.total, 1);
+
+      containment.restore();
+      containment = null;
+
+      assert.equal(process.kill, origProcessKill);
+    }
+  );
+
+  await t.test(
+    "setupSyntheticBrowser sets OMNIROUTE_LOGIN_BROWSER_PATH to non-executable fixture in _artifacts and restores on cleanup",
+    () => {
+      const prevEnv = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+      try {
+        delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+        containment = installAdobeTestContainment({ setupSyntheticBrowser: true });
+
+        const configuredPath = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+        assert.ok(configuredPath, "OMNIROUTE_LOGIN_BROWSER_PATH must be configured");
+        assert.match(configuredPath, /_artifacts.*synthetic-adobe-browser\.dummy$/);
+        assert.equal(fs.existsSync(configuredPath), true, "synthetic dummy file must exist");
+
+        containment.restore();
+        containment = null;
+
+        assert.equal(
+          process.env.OMNIROUTE_LOGIN_BROWSER_PATH,
+          undefined,
+          "OMNIROUTE_LOGIN_BROWSER_PATH must be restored to undefined"
+        );
+      } finally {
+        if (prevEnv !== undefined) {
+          process.env.OMNIROUTE_LOGIN_BROWSER_PATH = prevEnv;
+        } else {
+          delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
         }
       }
     }
