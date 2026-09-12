@@ -27,14 +27,19 @@ command -v pm2 >/dev/null 2>&1 || {
 NODE_BIN="$(node -p 'process.execPath')"
 
 DATA_DIR="${DATA_DIR:-${HOME}/.omniroute}"
-if [[ -f "${DATA_DIR}/server.env" ]]; then
-  # shellcheck disable=SC2046
-  export $(grep -v '^#' "${DATA_DIR}/server.env" | xargs)
-fi
-if [[ -f "${DATA_DIR}/.env" ]]; then
-  # shellcheck disable=SC2046
-  export $(grep -v '^#' "${DATA_DIR}/.env" | xargs)
-fi
+
+# Export environment variables using bootstrap-env so STORAGE_ENCRYPTION_KEY,
+# JWT_SECRET, and other configurations are propagated into PM2's update-env
+# without word-splitting on complex values like User-Agent strings.
+eval "$("${NODE_BIN}" -e '
+  const { bootstrapEnv } = await import("./scripts/build/bootstrap-env.mjs");
+  const env = bootstrapEnv({ quiet: true });
+  for (const [k, v] of Object.entries(env)) {
+    if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) {
+      console.log(`export ${k}=${JSON.stringify(v)}`);
+    }
+  }
+')"
 
 pm2 delete omniroute-server >/dev/null 2>&1 || true
 pm2 start "${SERVER_ENTRY}" \
