@@ -3079,11 +3079,6 @@
       "count": 1
     }
   },
-  "tests/unit/cli-serve-stop-command.test.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
   "tests/unit/cli-server-commands.test.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
