@@ -327,4 +327,133 @@ describe("ResourcePressureRuntime stale-while-revalidate cache", () => {
     assert.equal(second.getObservation().signals?.observedAtMs, 2);
     second.dispose();
   });
+
+  it("recovers from resource pressure through getObservation alone with burst dedup, backoff, and dispose safety", async () => {
+    let now = 0;
+    let sampleCount = 0;
+    const pendingCritical = deferred<ResourceSignals>();
+    const pendingRecovery = deferred<ResourceSignals>();
+    let throwOnSample = false;
+
+    const runtime = createResourcePressureRuntime({
+      nowMs: () => now,
+      staleAfterMs: 50,
+      maxStaleMs: 500,
+      retryAfterMs: 30,
+      immediateHeapUsedMb: () => 100,
+      sample: async () => {
+        sampleCount += 1;
+        if (sampleCount === 1) return pendingCritical.promise;
+        if (throwOnSample) throw new Error("sample failed");
+        if (sampleCount === 3) return pendingRecovery.promise;
+        return signals(now, 100);
+      },
+      thresholds: {
+        sustainedSamplesCritical: 1,
+        sustainedSamplesRecovery: 1,
+        heapAbsoluteThresholdMb: null,
+      },
+    });
+
+    // 1. Initial burst before anything has run: immediate return is empty/normal snapshot
+    for (let i = 0; i < 10; i += 1) {
+      const initialObs = runtime.getObservation();
+      assert.equal(initialObs.signals, null);
+      assert.equal(initialObs.state.severity, "normal");
+    }
+    assert.equal(
+      sampleCount,
+      0,
+      "getObservation schedules refresh asynchronously without blocking"
+    );
+
+    // Let scheduled task run
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sampleCount, 1, "refresh scheduled by getObservation started");
+
+    // Burst while refresh is in-flight: should dedup and return current snapshot
+    for (let i = 0; i < 10; i += 1) {
+      assert.equal(runtime.getObservation().signals, null);
+    }
+    assert.equal(sampleCount, 1, "in-flight refresh dedupes additional getObservation calls");
+
+    // Settle sample 1 with critical signal
+    pendingCritical.resolve(signals(0, 950));
+    await settleRefresh(runtime);
+    assert.equal(sampleCount, 1);
+    const criticalObs = runtime.getObservation();
+    assert.equal(
+      criticalObs.state.severity,
+      "critical",
+      "initial sampling transitioned to critical"
+    );
+    assert.equal(criticalObs.signals?.observedAtMs, 0);
+
+    // 2. Critical maintained while pending: advance past staleAfterMs
+    now = 60;
+    throwOnSample = true;
+    // Burst calls at now = 60 trigger refresh
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(
+        runtime.getObservation().state.severity,
+        "critical",
+        "critical maintained while pending refresh"
+      );
+    }
+    await settleRefresh(runtime);
+    assert.equal(sampleCount, 2, "stale getObservation triggered sample attempt");
+
+    // Failed sample preserves critical state and stale snapshot
+    const postFailObs = runtime.getObservation();
+    assert.equal(
+      postFailObs.state.severity,
+      "critical",
+      "critical preserved across sample failure"
+    );
+    assert.equal(postFailObs.signals?.observedAtMs, 0, "stale signals retained on failure");
+
+    // 3. Failure backoff: at now = 75 (< 60 + 30 retryAfterMs), getObservation must not trigger refresh
+    now = 75;
+    runtime.getObservation();
+    await settleRefresh(runtime);
+    assert.equal(sampleCount, 2, "refresh suppressed during failure backoff window");
+
+    // 4. Advance past backoff window: now = 95 (>= 60 + 30)
+    now = 95;
+    throwOnSample = false;
+    // Trigger refresh via getObservation
+    runtime.getObservation();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sampleCount, 3, "getObservation triggered refresh after backoff expired");
+
+    // While recovery sample is in-flight, critical state is maintained
+    assert.equal(
+      runtime.getObservation().state.severity,
+      "critical",
+      "critical maintained while recovery sample is in flight"
+    );
+
+    // Settle recovery sample
+    pendingRecovery.resolve(signals(95, 100));
+    await settleRefresh(runtime);
+    assert.equal(sampleCount, 3);
+
+    // Eventual recovery verified without any check() call!
+    const recoveredObs = runtime.getObservation();
+    assert.equal(
+      recoveredObs.state.severity,
+      "normal",
+      "eventual recovery to normal without check()"
+    );
+    assert.equal(recoveredObs.signals?.observedAtMs, 95);
+
+    // 5. Dispose suppression
+    runtime.dispose();
+    now = 200;
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(runtime.getObservation().state.severity, "normal");
+    }
+    await settleRefresh(runtime);
+    assert.equal(sampleCount, 3, "disposed runtime does not schedule refresh from getObservation");
+  });
 });

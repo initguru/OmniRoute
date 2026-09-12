@@ -245,7 +245,11 @@ export function createResourcePressureRuntime(
         })
       );
     },
-    getObservation: () => ({ signals: lastSignals, state }),
+    getObservation() {
+      const now = nowMs();
+      if (now >= nextRefreshAtMs) scheduleRefresh();
+      return { signals: lastSignals, state };
+    },
     whenRefreshSettled: async () => {
       if (scheduled) await new Promise<void>((resolve) => setImmediate(resolve));
       if (inFlight) await inFlight;
