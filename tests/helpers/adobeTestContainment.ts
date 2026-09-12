@@ -40,10 +40,44 @@ export interface AdobeTestContainmentOptions {
   setupSyntheticBrowser?: boolean;
 }
 
+export interface SyntheticBrowserFixture {
+  path: string;
+  ownedDir: string;
+  cleanup(): void;
+}
+
+export function createSyntheticBrowserFixture(baseDir?: string): SyntheticBrowserFixture {
+  const artifactsDir = baseDir ?? path.resolve(process.cwd(), "_artifacts");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  const prefix = path.join(artifactsDir, "synthetic-browser-");
+  const ownedDir = fs.mkdtempSync(prefix);
+  const browserPath = path.join(ownedDir, "synthetic-adobe-browser.dummy");
+  fs.writeFileSync(browserPath, "# dummy non-executable browser fixture\n", {
+    mode: 0o644,
+  });
+
+  return {
+    path: browserPath,
+    ownedDir,
+    cleanup() {
+      try {
+        if (fs.existsSync(ownedDir)) {
+          fs.rmSync(ownedDir, { recursive: true, force: true });
+        }
+      } catch {
+        /* best-effort */
+      }
+    },
+  };
+}
+
+let activeContainment = false;
+
 export interface AdobeTestContainmentHandle {
   counts: ContainmentCounts;
   attempts: ForbiddenAttempt[];
   syntheticBrowserPath?: string;
+  syntheticBrowserFixture?: SyntheticBrowserFixture;
   getCounts(): ContainmentCounts;
   assertNoForbiddenAttempts(context?: string): void;
   restore(): void;
@@ -52,6 +86,13 @@ export interface AdobeTestContainmentHandle {
 export function installAdobeTestContainment(
   options?: AdobeTestContainmentOptions
 ): AdobeTestContainmentHandle {
+  if (activeContainment) {
+    throw new Error(
+      "[AdobeTestContainment] Nested containment is not allowed while another instance is active. Call restore() on the active containment handle first."
+    );
+  }
+  activeContainment = true;
+
   const counts: ContainmentCounts = {
     childProcess: 0,
     processKill: 0,
@@ -135,21 +176,14 @@ export function installAdobeTestContainment(
   const shouldSetupSyntheticBrowser = options?.setupSyntheticBrowser !== false;
   let originalBrowserPathEnv: string | undefined = undefined;
   let didChangeBrowserPathEnv = false;
+  let syntheticBrowserFixture: SyntheticBrowserFixture | undefined = undefined;
   let syntheticBrowserPath: string | undefined = undefined;
-  let createdSyntheticFile = false;
 
   if (shouldSetupSyntheticBrowser) {
     originalBrowserPathEnv = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
-    const artifactsDir = path.resolve(process.cwd(), "_artifacts");
     try {
-      fs.mkdirSync(artifactsDir, { recursive: true });
-      syntheticBrowserPath = path.join(artifactsDir, "synthetic-adobe-browser.dummy");
-      if (!fs.existsSync(syntheticBrowserPath)) {
-        fs.writeFileSync(syntheticBrowserPath, "# dummy non-executable browser fixture\n", {
-          mode: 0o644,
-        });
-        createdSyntheticFile = true;
-      }
+      syntheticBrowserFixture = createSyntheticBrowserFixture();
+      syntheticBrowserPath = syntheticBrowserFixture.path;
       process.env.OMNIROUTE_LOGIN_BROWSER_PATH = syntheticBrowserPath;
       didChangeBrowserPathEnv = true;
     } catch {
@@ -245,6 +279,7 @@ export function installAdobeTestContainment(
   function restore(): void {
     if (restored) return;
     restored = true;
+    activeContainment = false;
 
     // Restore child_process
     cp.spawn = originalCp.spawn;
@@ -306,15 +341,9 @@ export function installAdobeTestContainment(
       } else {
         delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
       }
-      if (createdSyntheticFile && syntheticBrowserPath) {
-        try {
-          if (fs.existsSync(syntheticBrowserPath)) {
-            fs.unlinkSync(syntheticBrowserPath);
-          }
-        } catch {
-          /* best-effort */
-        }
-      }
+    }
+    if (syntheticBrowserFixture) {
+      syntheticBrowserFixture.cleanup();
     }
   }
 
@@ -336,6 +365,7 @@ export function installAdobeTestContainment(
     counts,
     attempts,
     syntheticBrowserPath,
+    syntheticBrowserFixture,
     getCounts: () => ({ ...counts }),
     assertNoForbiddenAttempts,
     restore,

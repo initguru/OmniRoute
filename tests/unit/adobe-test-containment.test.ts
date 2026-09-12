@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import { kill } from "node:process";
 import cp, {
   spawn,
@@ -17,6 +18,7 @@ import net from "node:net";
 import tls from "node:tls";
 import {
   installAdobeTestContainment,
+  createSyntheticBrowserFixture,
   type AdobeTestContainmentHandle,
 } from "../helpers/adobeTestContainment.ts";
 
@@ -295,6 +297,80 @@ test("adobe test containment preflight - blocks all forbidden delegate calls and
           process.env.OMNIROUTE_LOGIN_BROWSER_PATH = prevEnv;
         } else {
           delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+        }
+      }
+    }
+  );
+
+  await t.test(
+    "nested containment is explicitly rejected while an instance is active and allowed after restore",
+    () => {
+      containment = installAdobeTestContainment();
+      assert.throws(
+        () => {
+          installAdobeTestContainment();
+        },
+        (err: unknown) => {
+          assert.match(String(err), /Nested containment is not allowed/);
+          return true;
+        }
+      );
+
+      containment.restore();
+      containment = null;
+
+      // After restore, a new containment can be installed cleanly
+      const nextContainment = installAdobeTestContainment();
+      assert.ok(nextContainment);
+      nextContainment.restore();
+    }
+  );
+
+  await t.test(
+    "interleaved synthetic browser fixtures have distinct owned directories and isolated cleanup",
+    () => {
+      const artifactsDir = path.resolve(process.cwd(), "_artifacts");
+      fs.mkdirSync(artifactsDir, { recursive: true });
+      const unrelatedFile = path.join(artifactsDir, "test-unrelated-fixture.txt");
+      fs.writeFileSync(unrelatedFile, "unrelated fixture content\n");
+
+      try {
+        const fixtureA = createSyntheticBrowserFixture();
+        const fixtureB = createSyntheticBrowserFixture();
+
+        assert.notEqual(fixtureA.path, fixtureB.path, "fixtures must have distinct paths");
+        assert.notEqual(
+          fixtureA.ownedDir,
+          fixtureB.ownedDir,
+          "fixtures must have distinct owned dirs"
+        );
+        assert.equal(fs.existsSync(fixtureA.path), true, "fixtureA must exist");
+        assert.equal(fs.existsSync(fixtureB.path), true, "fixtureB must exist");
+        assert.equal(fs.existsSync(unrelatedFile), true, "unrelated file must exist");
+
+        // Cleanup A: B must still exist, unrelated file must not be touched
+        fixtureA.cleanup();
+        assert.equal(fs.existsSync(fixtureA.path), false, "fixtureA must be deleted");
+        assert.equal(fs.existsSync(fixtureA.ownedDir), false, "fixtureA ownedDir must be deleted");
+        assert.equal(
+          fs.existsSync(fixtureB.path),
+          true,
+          "fixtureB must still exist after A cleanup"
+        );
+        assert.equal(fs.existsSync(unrelatedFile), true, "unrelated file must remain untouched");
+
+        // Cleanup B: B is deleted, unrelated file remains
+        fixtureB.cleanup();
+        assert.equal(fs.existsSync(fixtureB.path), false, "fixtureB must be deleted");
+        assert.equal(fs.existsSync(fixtureB.ownedDir), false, "fixtureB ownedDir must be deleted");
+        assert.equal(fs.existsSync(unrelatedFile), true, "unrelated file must remain untouched");
+      } finally {
+        if (fs.existsSync(unrelatedFile)) {
+          try {
+            fs.unlinkSync(unrelatedFile);
+          } catch {
+            /* best effort */
+          }
         }
       }
     }
