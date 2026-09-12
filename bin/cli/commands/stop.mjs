@@ -22,37 +22,62 @@ export function registerStop(program) {
     });
 }
 
-export async function runStopCommand(opts = {}) {
-  const pid = readPidFile("server");
+export async function runStopCommand(opts = {}, deps = {}) {
+  const readPid = deps.readPidFile || readPidFile;
+  const running = deps.isPidRunning || isPidRunning;
+  const kill = deps.processKill || ((p, sig) => process.kill(p, sig));
+  const wait = deps.sleep || sleep;
+  const stopGracefully = deps.stopProcessGracefully || stopProcessGracefully;
+  const killSubprocesses = deps.killAllSubprocesses || killAllSubprocesses;
+  const cleanupPid = deps.cleanupPidFile || cleanupPidFile;
+  const killPort =
+    deps.killByPort ||
+    ((p, d = {}) =>
+      killByPort(p, {
+        execFileAsync: deps.execFileAsync,
+        processKill: kill,
+        isPidRunning: running,
+        sleep: wait,
+        platform: deps.platform,
+        ...d,
+      }));
+
+  const pid = readPid("server");
   // #9455: when the server was started with a supervisor (the default), killing only
   // the child lets the supervisor respawn it immediately. The supervisor's PID is
   // persisted separately by serve.mjs; SIGTERM it FIRST so its handler sets
   // isShuttingDown=true and stops the child cleanly without respawning.
-  const supervisorPid = readPidFile("supervisor");
+  const supervisorPid = readPid("supervisor");
 
-  if (pid && isPidRunning(pid)) {
+  if (pid && running(pid)) {
     console.log(t("stop.stopping", { pid }));
     try {
-      if (supervisorPid && isPidRunning(supervisorPid)) {
+      if (supervisorPid && running(supervisorPid)) {
         try {
-          process.kill(supervisorPid, "SIGTERM");
+          kill(supervisorPid, "SIGTERM");
         } catch {}
         // Give the supervisor a moment to cascade the shutdown to its child so we
         // don't race the child kill against the supervisor's own child stop.
-        await sleep(300);
+        await wait(300);
       }
 
       // #8045: on win32, process.kill(pid, "SIGTERM") unconditionally force-terminates
       // the target instead of delivering an interceptable signal, racing (and beating)
       // the server's own async graceful shutdown / WAL checkpoint. stopProcessGracefully
       // skips the immediate SIGTERM on win32 and just polls before escalating to SIGKILL.
-      if (isPidRunning(pid)) {
-        await stopProcessGracefully({ pid, timeoutMs: 5000, isPidRunning, sleep });
+      if (running(pid)) {
+        await stopGracefully({
+          pid,
+          timeoutMs: 5000,
+          isPidRunning: running,
+          sleep: wait,
+          platform: deps.platform,
+        });
       }
 
-      killAllSubprocesses();
-      cleanupPidFile("server");
-      cleanupPidFile("supervisor");
+      killSubprocesses();
+      cleanupPid("server");
+      cleanupPid("supervisor");
       console.log(t("stop.stopped"));
       return 0;
     } catch (err) {
@@ -68,15 +93,15 @@ export async function runStopCommand(opts = {}) {
     console.log(t("stop.portFallback"));
     // #9455: a stale supervisor PID file would let the port-fallback stop also
     // leave the supervisor running and respawning. Stop it first.
-    if (supervisorPid && isPidRunning(supervisorPid)) {
+    if (supervisorPid && running(supervisorPid)) {
       try {
-        process.kill(supervisorPid, "SIGTERM");
+        kill(supervisorPid, "SIGTERM");
       } catch {}
     }
-    const portFreed = await killByPort(port);
-    killAllSubprocesses();
-    cleanupPidFile("server");
-    cleanupPidFile("supervisor");
+    const portFreed = await killPort(port);
+    killSubprocesses();
+    cleanupPid("server");
+    cleanupPid("supervisor");
     // #9455: only report success when the port is actually free — previously stop
     // printed "Server stopped." even when killByPort was a no-op (win32).
     if (portFreed) {
