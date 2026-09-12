@@ -375,4 +375,77 @@ test("adobe test containment preflight - blocks all forbidden delegate calls and
       }
     }
   );
+
+  await t.test(
+    "failure to create synthetic browser fixture explicitly throws and cleanly rolls back partial state",
+    () => {
+      const prevBrowserPath = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+      const prevRefresh = process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
+      const origMkdtempSync = fs.mkdtempSync;
+      const origSpawn = cp.spawn;
+
+      try {
+        process.env.OMNIROUTE_LOGIN_BROWSER_PATH = "/preserved/browser/path";
+        process.env.ADOBE_FIREFLY_BROWSER_REFRESH = "1";
+
+        // Mock fs.mkdtempSync to deterministically simulate directory creation failure
+        (fs as unknown as Record<string, unknown>).mkdtempSync = () => {
+          throw new Error("EACCES: permission denied, mkdtemp");
+        };
+
+        // Must explicitly throw fail-closed error with safe message without leaking internal paths
+        assert.throws(
+          () => {
+            installAdobeTestContainment({
+              optOutBrowserRefresh: true,
+              setupSyntheticBrowser: true,
+            });
+          },
+          (err: unknown) => {
+            const str = String(err);
+            assert.match(str, /Failed to create synthetic browser fixture/);
+            // Must not leak raw system path in error message
+            assert.equal(str.includes("/preserved/browser/path"), false);
+            return true;
+          }
+        );
+
+        // State rollback verification
+        assert.equal(
+          process.env.OMNIROUTE_LOGIN_BROWSER_PATH,
+          "/preserved/browser/path",
+          "OMNIROUTE_LOGIN_BROWSER_PATH must be rolled back"
+        );
+        assert.equal(
+          process.env.ADOBE_FIREFLY_BROWSER_REFRESH,
+          "1",
+          "ADOBE_FIREFLY_BROWSER_REFRESH must be rolled back"
+        );
+        assert.equal(cp.spawn, origSpawn, "child_process bindings must remain unpatched");
+
+        // Restore mkdtempSync so we can test clean re-installation
+        fs.mkdtempSync = origMkdtempSync;
+
+        // Verify activeContainment was rolled back, allowing clean re-installation
+        const cleanHandle = installAdobeTestContainment({
+          optOutBrowserRefresh: true,
+          setupSyntheticBrowser: true,
+        });
+        assert.ok(cleanHandle);
+        cleanHandle.restore();
+      } finally {
+        fs.mkdtempSync = origMkdtempSync;
+        if (prevBrowserPath !== undefined) {
+          process.env.OMNIROUTE_LOGIN_BROWSER_PATH = prevBrowserPath;
+        } else {
+          delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+        }
+        if (prevRefresh !== undefined) {
+          process.env.ADOBE_FIREFLY_BROWSER_REFRESH = prevRefresh;
+        } else {
+          delete process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
+        }
+      }
+    }
+  );
 });

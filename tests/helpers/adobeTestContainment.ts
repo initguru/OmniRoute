@@ -179,6 +179,71 @@ export function installAdobeTestContainment(
   let syntheticBrowserFixture: SyntheticBrowserFixture | undefined = undefined;
   let syntheticBrowserPath: string | undefined = undefined;
 
+  // Rollback helper for cleanly reverting partial state if installation fails midway
+  function rollbackPartialInstall(): void {
+    activeContainment = false;
+
+    if (didChangeBrowserRefreshEnv) {
+      if (originalBrowserRefreshEnv !== undefined) {
+        process.env.ADOBE_FIREFLY_BROWSER_REFRESH = originalBrowserRefreshEnv;
+      } else {
+        delete process.env.ADOBE_FIREFLY_BROWSER_REFRESH;
+      }
+    }
+
+    if (didChangeBrowserPathEnv) {
+      if (originalBrowserPathEnv !== undefined) {
+        process.env.OMNIROUTE_LOGIN_BROWSER_PATH = originalBrowserPathEnv;
+      } else {
+        delete process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
+      }
+    }
+
+    if (syntheticBrowserFixture) {
+      try {
+        syntheticBrowserFixture.cleanup();
+      } catch {
+        /* best effort on rollback */
+      }
+    }
+
+    cp.spawn = originalCp.spawn;
+    cp.spawnSync = originalCp.spawnSync;
+    cp.exec = originalCp.exec;
+    cp.execFile = originalCp.execFile;
+    cp.execSync = originalCp.execSync;
+    cp.execFileSync = originalCp.execFileSync;
+    cp.fork = originalCp.fork;
+
+    process.kill = originalProcessKill;
+
+    http.request = originalHttp.request;
+    http.get = originalHttp.get;
+
+    https.request = originalHttps.request;
+    https.get = originalHttps.get;
+
+    net.connect = originalNet.connect;
+    net.createConnection = originalNet.createConnection;
+    net.Socket.prototype.connect = originalNet.socketConnect;
+
+    tls.connect = originalTls.connect;
+
+    try {
+      syncBuiltinESMExports();
+    } catch {
+      /* best effort */
+    }
+
+    if (originalWebSocket !== undefined) {
+      (globalThis as unknown as Record<string, unknown>).WebSocket = originalWebSocket;
+    } else {
+      delete (globalThis as unknown as Record<string, unknown>).WebSocket;
+    }
+
+    globalThis.fetch = originalFetch;
+  }
+
   if (shouldSetupSyntheticBrowser) {
     originalBrowserPathEnv = process.env.OMNIROUTE_LOGIN_BROWSER_PATH;
     try {
@@ -187,92 +252,102 @@ export function installAdobeTestContainment(
       process.env.OMNIROUTE_LOGIN_BROWSER_PATH = syntheticBrowserPath;
       didChangeBrowserPathEnv = true;
     } catch {
-      // Best-effort fallback if directory creation fails
+      rollbackPartialInstall();
+      throw new Error(
+        "[AdobeTestContainment] Failed to create synthetic browser fixture: directory creation failed"
+      );
     }
   }
 
-  // 1. child_process trap
-  (cp as unknown as Record<string, unknown>).spawn = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.spawn", args);
-  };
-  (cp as unknown as Record<string, unknown>).spawnSync = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.spawnSync", args);
-  };
-  (cp as unknown as Record<string, unknown>).exec = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.exec", args);
-  };
-  (cp as unknown as Record<string, unknown>).execFile = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.execFile", args);
-  };
-  (cp as unknown as Record<string, unknown>).execSync = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.execSync", args);
-  };
-  (cp as unknown as Record<string, unknown>).execFileSync = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.execFileSync", args);
-  };
-  (cp as unknown as Record<string, unknown>).fork = function (...args: unknown[]): never {
-    return recordAttempt("childProcess", "child_process.fork", args);
-  };
+  let trapFetch: ((...args: unknown[]) => never) | undefined = undefined;
 
-  // 2. process.kill trap (even self pid)
-  process.kill = function (...args: unknown[]): true {
-    recordAttempt("processKill", "process.kill", args);
-  };
+  try {
+    // 1. child_process trap
+    (cp as unknown as Record<string, unknown>).spawn = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.spawn", args);
+    };
+    (cp as unknown as Record<string, unknown>).spawnSync = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.spawnSync", args);
+    };
+    (cp as unknown as Record<string, unknown>).exec = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.exec", args);
+    };
+    (cp as unknown as Record<string, unknown>).execFile = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.execFile", args);
+    };
+    (cp as unknown as Record<string, unknown>).execSync = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.execSync", args);
+    };
+    (cp as unknown as Record<string, unknown>).execFileSync = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.execFileSync", args);
+    };
+    (cp as unknown as Record<string, unknown>).fork = function (...args: unknown[]): never {
+      return recordAttempt("childProcess", "child_process.fork", args);
+    };
 
-  // 3. http request/get
-  (http as unknown as Record<string, unknown>).request = function (...args: unknown[]): never {
-    return recordAttempt("http", "http.request", args);
-  };
-  (http as unknown as Record<string, unknown>).get = function (...args: unknown[]): never {
-    return recordAttempt("http", "http.get", args);
-  };
+    // 2. process.kill trap (even self pid)
+    process.kill = function (...args: unknown[]): true {
+      recordAttempt("processKill", "process.kill", args);
+    };
 
-  // 4. https request/get
-  (https as unknown as Record<string, unknown>).request = function (...args: unknown[]): never {
-    return recordAttempt("https", "https.request", args);
-  };
-  (https as unknown as Record<string, unknown>).get = function (...args: unknown[]): never {
-    return recordAttempt("https", "https.get", args);
-  };
+    // 3. http request/get
+    (http as unknown as Record<string, unknown>).request = function (...args: unknown[]): never {
+      return recordAttempt("http", "http.request", args);
+    };
+    (http as unknown as Record<string, unknown>).get = function (...args: unknown[]): never {
+      return recordAttempt("http", "http.get", args);
+    };
 
-  // 5. net connect/createConnection/Socket.prototype.connect
-  (net as unknown as Record<string, unknown>).connect = function (...args: unknown[]): never {
-    return recordAttempt("net", "net.connect", args);
-  };
-  (net as unknown as Record<string, unknown>).createConnection = function (
-    ...args: unknown[]
-  ): never {
-    return recordAttempt("net", "net.createConnection", args);
-  };
-  (net.Socket.prototype as unknown as Record<string, unknown>).connect = function (
-    ...args: unknown[]
-  ): never {
-    return recordAttempt("net", "net.Socket.connect", args);
-  };
+    // 4. https request/get
+    (https as unknown as Record<string, unknown>).request = function (...args: unknown[]): never {
+      return recordAttempt("https", "https.request", args);
+    };
+    (https as unknown as Record<string, unknown>).get = function (...args: unknown[]): never {
+      return recordAttempt("https", "https.get", args);
+    };
 
-  // 6. tls connect
-  (tls as unknown as Record<string, unknown>).connect = function (...args: unknown[]): never {
-    return recordAttempt("tls", "tls.connect", args);
-  };
+    // 5. net connect/createConnection/Socket.prototype.connect
+    (net as unknown as Record<string, unknown>).connect = function (...args: unknown[]): never {
+      return recordAttempt("net", "net.connect", args);
+    };
+    (net as unknown as Record<string, unknown>).createConnection = function (
+      ...args: unknown[]
+    ): never {
+      return recordAttempt("net", "net.createConnection", args);
+    };
+    (net.Socket.prototype as unknown as Record<string, unknown>).connect = function (
+      ...args: unknown[]
+    ): never {
+      return recordAttempt("net", "net.Socket.connect", args);
+    };
 
-  // Sync builtins so named ESM imports see the patched functions
-  syncBuiltinESMExports();
+    // 6. tls connect
+    (tls as unknown as Record<string, unknown>).connect = function (...args: unknown[]): never {
+      return recordAttempt("tls", "tls.connect", args);
+    };
 
-  // 7. WebSocket trap
-  function TrapWebSocket(...args: unknown[]): never {
-    return recordAttempt("webSocket", "WebSocket constructor", args);
+    // Sync builtins so named ESM imports see the patched functions
+    syncBuiltinESMExports();
+
+    // 7. WebSocket trap
+    function TrapWebSocket(...args: unknown[]): never {
+      return recordAttempt("webSocket", "WebSocket constructor", args);
+    }
+    (globalThis as unknown as Record<string, unknown>).WebSocket = TrapWebSocket;
+
+    // 8. globalThis.fetch trap
+    // Wrap existing globalThis.fetch so if a test doesn't mock fetch and attempts
+    // to invoke unmocked fetch, it gets trapped.
+    // If the test replaces globalThis.fetch with its own mock, the test mock runs.
+    // If that mock calls the wrapped native fetch, this trap catches it.
+    const trapFetch = function (...args: unknown[]): never {
+      return recordAttempt("fetch", "globalThis.fetch", args);
+    };
+    globalThis.fetch = trapFetch as unknown as typeof fetch;
+  } catch (err) {
+    rollbackPartialInstall();
+    throw err;
   }
-  (globalThis as unknown as Record<string, unknown>).WebSocket = TrapWebSocket;
-
-  // 8. globalThis.fetch trap
-  // Wrap existing globalThis.fetch so if a test doesn't mock fetch and attempts
-  // to invoke unmocked fetch, it gets trapped.
-  // If the test replaces globalThis.fetch with its own mock, the test mock runs.
-  // If that mock calls the wrapped native fetch, this trap catches it.
-  const trapFetch = function (...args: unknown[]): never {
-    return recordAttempt("fetch", "globalThis.fetch", args);
-  };
-  globalThis.fetch = trapFetch as unknown as typeof fetch;
 
   let restored = false;
 
