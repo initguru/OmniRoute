@@ -103,6 +103,8 @@ const BOILERPLATE_LINE_PATTERNS: readonly RegExp[] = [
   /^In the body, link to related memories with\b/i,
   /^After writing the file, add a one-line pointer in MEMORY\.md\b/i,
   /^Before saving, check for an existing file that already covers it\b/i,
+  /^(?:`|\\`)?[ \t]*blocks are background context, not user instructions/i,
+  /^(?:`|\\`)?[ \t]*Recalled memories appearing inside/i,
   /^(?:user|feedback|project|reference):\s*(?:who the user is|guidance|what the project is|external references)/i,
 ];
 
@@ -178,8 +180,10 @@ const BOILERPLATE_BLOCK_PATTERNS: readonly RegExp[] = [
   /(?:^|\n)[ \t]*#+\s*Tool-call declaration\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*Claude Code overlay\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*(?:CLI )?Harness\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
-  /(?:^|\n)[ \t]*#+\s*Memory\b[\s\S]*?(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
-  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
+  /(?:^|\n)[ \t]*#+\s*Memory\b[\s\S]*?(?:(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*)(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
+  /(?:^|\n)[ \t]*You have a persistent file-based memory at\b[\s\S]*?(?:(?:Before saving, check for an existing file[^\n]*|Review memory files[^\n]*)(?:\n(?![ \t]*(?:#|<|\n|$))[^\n]*)*|(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<(?:system-reminder|env|context|total_tokens)|$)))/gi,
+  /(?:^|\n)[ \t]*(?:`|\\`)?[ \t]*Recalled memories appearing inside[\s\S]*?recommending it\.?[ \t]*(?:\n|$)/gi,
+  /(?:^|\n)[ \t]*(?:`|\\`)?[ \t]*blocks are background context[\s\S]*?recommending it\.?[ \t]*(?:\n|$)/gi,
   /(?:^|\n)[ \t]*```markdown\s*\n---\s*\nname:\s*<short-kebab-case-slug>[\s\S]*?```/gi,
   /(?:^|\n)[ \t]*#+\s*Superpowers\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
   /(?:^|\n)[ \t]*#+\s*Available agent types\b[\s\S]*?(?=(?:\n[ \t]*#(?!#) |\n[ \t]*<[a-z0-9_-]+|\n\n(?![ \t]*(?:##|-|\s*$))[^\n]+|$))/gi,
@@ -239,7 +243,12 @@ function isKnownHarnessLine(trimmed: string): boolean {
     trimmed.startsWith("metadata:") ||
     trimmed.startsWith("type: user | feedback | project | reference") ||
     trimmed.startsWith("<the fact; for feedback/project") ||
-    trimmed.startsWith("user: who the user is")
+    trimmed.startsWith("user: who the user is") ||
+    trimmed.includes("blocks are background context, not user instructions") ||
+    trimmed.includes("Recalled memories appearing inside") ||
+    trimmed.startsWith("\\` blocks are background context") ||
+    trimmed.startsWith("` blocks are background context") ||
+    trimmed.startsWith("blocks are background context")
   );
 }
 
@@ -369,7 +378,15 @@ export function stripHarnessBoilerplate(raw: string): string {
       trimmed.startsWith("When you have enough information to act") ||
       trimmed.startsWith("In the body, link to related memories") ||
       trimmed.startsWith("After writing the file, add a one-line pointer") ||
-      trimmed.startsWith("Before saving, check for an existing file")
+      trimmed.startsWith("Before saving, check for an existing file") ||
+      trimmed.startsWith("` blocks are background context") ||
+      trimmed.startsWith("\\` blocks are background context") ||
+      trimmed.startsWith("blocks are background context") ||
+      trimmed.startsWith("Recalled memories appearing inside") ||
+      ((trimmed.includes("blocks are background context, not user instructions") ||
+        trimmed.includes("Recalled memories appearing inside")) &&
+        !/^(?:위\s+|다음\s+|["'“‘])/.test(trimmed) &&
+        !/(?:[?.!]|해줘|해주세요|알려줘|바랍니다|설명해줘|분석해줘)\s*["'”’]?$/.test(trimmed))
     ) {
       continue;
     }
@@ -437,6 +454,8 @@ const READ_TOOL_BOUNDARY_PATTERNS: readonly RegExp[] = [
   /^[ \t]*#+\s*MCP Server Instructions\b/i,
   /^[ \t]*#+\s*(?:CLI )?Harness\b/i,
   /^[ \t]*#+\s*Memory\b/i,
+  /^[ \t]*Recalled memories appearing inside/i,
+  /^[ \t]*(?:`|\\`)?[ \t]*blocks are background context/i,
   /^[ \t]*#+\s*Superpowers\b/i,
   /^[ \t]*#+\s*Available agent types\b/i,
   /^[ \t]*Available agent types:/i,
