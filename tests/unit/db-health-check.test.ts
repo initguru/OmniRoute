@@ -335,6 +335,77 @@ test("getDbInstance skips automatic startup repair during tests unless forced", 
   );
 });
 
+test("OMNIROUTE_SKIP_DB_HEALTHCHECK skips the entire forced startup check", async () => {
+  let db = core.getDbInstance();
+  insertBrokenRows(db);
+  core.resetDbInstance();
+
+  const previousForce = process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK;
+  const previousSkip = process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK;
+  process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK = "1";
+  process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK = "1";
+  try {
+    db = core.getDbInstance();
+  } finally {
+    if (previousForce === undefined) delete process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK;
+    else process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK = previousForce;
+    if (previousSkip === undefined) delete process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK;
+    else process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK = previousSkip;
+  }
+
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get() as { count: number }).count,
+    2
+  );
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM domain_budgets").get() as { count: number }).count,
+    1
+  );
+});
+
+test("getDbInstance startup health check skips quick_check by default to eliminate boot freeze", async () => {
+  const { runtimeRequire } = await import("../../src/lib/db/adapters/runtimeRequire.ts");
+  const Database = runtimeRequire("better-sqlite3") as {
+    prototype: {
+      pragma: (this: unknown, str: string, ...args: unknown[]) => unknown;
+    };
+  };
+
+  let quickCheckCalls = 0;
+  const origPragma = Database.prototype.pragma;
+  Database.prototype.pragma = function (this: unknown, str: string, ...args: unknown[]) {
+    if (typeof str === "string" && str.includes("quick_check")) {
+      quickCheckCalls++;
+    }
+    return origPragma.call(this, str, ...args);
+  };
+
+  const previousForce = process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK;
+  process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK = "1";
+  try {
+    core.resetDbInstance();
+    const db = core.getDbInstance();
+    assert.equal(
+      quickCheckCalls,
+      0,
+      "PRAGMA quick_check should be skipped during startup to prevent boot freeze"
+    );
+
+    // Verify that non-startup health checks (such as background scheduler) still execute quick_check
+    healthCheckDb.runDbHealthCheck(db, { autoRepair: false });
+    assert.equal(
+      quickCheckCalls,
+      1,
+      "PRAGMA quick_check should run during periodic/deep health checks"
+    );
+  } finally {
+    Database.prototype.pragma = origPragma;
+    if (previousForce === undefined) delete process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK;
+    else process.env.OMNIROUTE_FORCE_DB_HEALTHCHECK = previousForce;
+    core.resetDbInstance();
+  }
+});
+
 test("runDbHealthCheck repairs a drifted db_meta schema version", async () => {
   const db = core.getDbInstance();
   db.prepare("UPDATE db_meta SET value = ? WHERE key = 'schema_version'").run("0");

@@ -943,7 +943,13 @@ function clearDbHealthCheckScheduler() {
 
 function startDbHealthCheckScheduler(db: SqliteDatabase) {
   clearDbHealthCheckScheduler();
-  if (isCloud || isBuildPhase || isAutomatedTestProcess()) return;
+  if (
+    isCloud ||
+    isBuildPhase ||
+    isAutomatedTestProcess() ||
+    process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK === "1"
+  )
+    return;
 
   const intervalMs = getDbHealthCheckIntervalMs();
   if (intervalMs <= 0) return;
@@ -951,9 +957,9 @@ function startDbHealthCheckScheduler(db: SqliteDatabase) {
   dbHealthCheckTimer = setInterval(() => {
     try {
       if (!db.open) return;
+      if (process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK === "1") return;
       runDbHealthCheck(db, {
         autoRepair: true,
-        skipIntegrityCheck: process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK === "1",
         expectedSchemaVersion: "1",
         createBackupBeforeRepair: () => createHealthCheckBackup(db),
       });
@@ -1329,16 +1335,17 @@ export function getDbInstance(): SqliteDatabase {
   );
   versionStmt.run();
   if (shouldRunStartupDbHealthCheck()) {
-    const skipIntegrityCheck = process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK === "1";
-    if (skipIntegrityCheck) {
+    const skipHealthCheck = process.env.OMNIROUTE_SKIP_DB_HEALTHCHECK === "1";
+    if (skipHealthCheck) {
       console.log("[DB] Health check skipped (OMNIROUTE_SKIP_DB_HEALTHCHECK=1)");
+    } else {
+      runDbHealthCheck(db, {
+        autoRepair: true,
+        expectedSchemaVersion: "1",
+        skipIntegrityCheck: true,
+        createBackupBeforeRepair: () => createHealthCheckBackup(db),
+      });
     }
-    runDbHealthCheck(db, {
-      autoRepair: true,
-      expectedSchemaVersion: "1",
-      skipIntegrityCheck,
-      createBackupBeforeRepair: () => createHealthCheckBackup(db),
-    });
   }
 
   setDb(db);
