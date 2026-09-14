@@ -431,6 +431,87 @@ export async function cleanupCcrBlocks(): Promise<CleanupResult> {
 }
 
 /**
+ * Clean up old agentic conversations and their turn nodes based on a 7-day TTL.
+ * Uses bounded chunking and yields between batches to prevent event-loop stalls.
+ */
+export async function cleanupAgenticConversations(options?: {
+  batchSize?: number;
+  maxConversations?: number;
+  yieldDelayMs?: number;
+}): Promise<CleanupResult> {
+  const db = getDbInstance();
+  const result: CleanupResult = { deleted: 0, errors: 0 };
+
+  const retentionDays = 7;
+  const cutoffISO = new Date(Date.now() - retentionDays * 86_400_000).toISOString();
+
+  const batchSize = Math.max(1, Math.min(500, options?.batchSize ?? 100));
+  const maxConversations = options?.maxConversations ?? 5000;
+  const yieldDelayMs = options?.yieldDelayMs ?? 20;
+
+  try {
+    let processed = 0;
+
+    while (processed < maxConversations) {
+      const remainingLimit = Math.min(batchSize, maxConversations - processed);
+      if (remainingLimit <= 0) break;
+
+      const expiredRows = db
+        .prepare(
+          "SELECT id FROM agentic_conversations WHERE last_seen_at < ? ORDER BY last_seen_at ASC LIMIT ?"
+        )
+        .all(cutoffISO, remainingLimit) as Array<{ id: string }>;
+
+      if (!expiredRows || expiredRows.length === 0) {
+        break;
+      }
+
+      const ids = expiredRows.map((r) => r.id);
+      const placeholders = ids.map(() => "?").join(",");
+
+      const deleteBatch = db.transaction(() => {
+        const turnRes = db
+          .prepare(`DELETE FROM conversation_turn_nodes WHERE conversation_id IN (${placeholders})`)
+          .run(...ids);
+        const convRes = db
+          .prepare(`DELETE FROM agentic_conversations WHERE id IN (${placeholders})`)
+          .run(...ids);
+        return (turnRes.changes ?? 0) + (convRes.changes ?? 0);
+      });
+
+      const batchDeleted = deleteBatch();
+      result.deleted += batchDeleted;
+      processed += ids.length;
+
+      if (ids.length < remainingLimit || processed >= maxConversations) {
+        break;
+      }
+
+      if (yieldDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, yieldDelayMs));
+      }
+    }
+
+    // Defensive orphan node cleanup (run once per cleanup pass)
+    const orphanRes = db
+      .prepare(
+        "DELETE FROM conversation_turn_nodes WHERE conversation_id NOT IN (SELECT id FROM agentic_conversations) LIMIT 5000"
+      )
+      .run();
+    result.deleted += orphanRes.changes ?? 0;
+
+    console.log(
+      `[Cleanup] Deleted ${result.deleted} agentic conversation & turn node rows older than ${retentionDays} days`
+    );
+  } catch (err: unknown) {
+    console.error("[Cleanup] Error cleaning agentic_conversations:", err);
+    result.errors++;
+  }
+
+  return result;
+}
+
+/**
  * Run all cleanup functions if auto-cleanup is enabled.
  */
 export async function runAutoCleanup(): Promise<{
@@ -463,6 +544,7 @@ export async function runAutoCleanup(): Promise<{
     compressionRunTelemetry: await cleanupCompressionRunTelemetry(),
     proxyLogs: await cleanupProxyLogs(),
     ccrBlocks: await cleanupCcrBlocks(),
+    agenticConversations: await cleanupAgenticConversations(),
   };
 
   const totalDeleted = Object.values(results).reduce((sum, r) => sum + r.deleted, 0);
@@ -765,10 +847,15 @@ export async function cleanupProxyLogs(): Promise<CleanupResult> {
 
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 let _cleanupSchedulerTimer: ReturnType<typeof setInterval> | null = null;
+// VACUUM is a synchronous, file-sized operation in better-sqlite3.  Running it
+// automatically can block every HTTP request for minutes on a multi-gigabyte DB.
+// Keep it opt-in for operators who explicitly schedule it during a maintenance
+// window (the cleanup DELETEs still run normally).
+const AUTO_VACUUM_ENABLED = process.env.OMNIROUTE_AUTO_VACUUM === "1";
 
 /**
  * Start the background cleanup scheduler. Runs cleanup on startup
- * and then every 6 hours. Runs VACUUM after deletes to reclaim disk space.
+ * and then every 6 hours. VACUUM after deletes requires OMNIROUTE_AUTO_VACUUM=1.
  *
  * Without this, tables grow unboundedly (compression_analytics 600K+ rows,
  * usage_history 250K+ rows) causing 1.4GB+ SQLite files and 3-8GB RSS
@@ -783,7 +870,7 @@ export function startCleanupScheduler(): void {
       const result = await runAutoCleanup();
       const proxyResult = await cleanupProxyLogs();
       const totalDeleted = result.totalDeleted + proxyResult.deleted;
-      if (totalDeleted > 0) {
+      if (totalDeleted > 0 && AUTO_VACUUM_ENABLED) {
         console.log(`[Cleanup] Startup cleanup freed ${totalDeleted} rows. Running VACUUM...`);
         try {
           const db = getDbInstance();
@@ -804,7 +891,7 @@ export function startCleanupScheduler(): void {
       const result = await runAutoCleanup();
       const proxyResult = await cleanupProxyLogs();
       const totalDeleted = result.totalDeleted + proxyResult.deleted;
-      if (totalDeleted > 0) {
+      if (totalDeleted > 0 && AUTO_VACUUM_ENABLED) {
         console.log(`[Cleanup] Periodic cleanup freed ${totalDeleted} rows. Running VACUUM...`);
         try {
           const db = getDbInstance();
