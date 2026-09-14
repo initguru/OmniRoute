@@ -102,8 +102,9 @@ test.beforeEach(async () => {
   await resetStorage();
 });
 
-test.after(() => {
+test.after(async () => {
   restorePipelineEnv();
+  await callLogs.closeCallLogSaves(500).catch(() => {});
   core.resetDbInstance();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
@@ -804,6 +805,96 @@ test("CALL_LOG_PIPELINE_MAX_SIZE_KB does not cap artifacts without pipeline deta
   const artifactPath = path.join(TEST_DATA_DIR, "call_logs", (row as CallLogRow).artifact_relpath);
   const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
   assert.equal(artifact.requestBody.payload.length, requestBody.payload.length);
+});
+
+test("saveCallLog assigns a fresh row id when an attempt reuses a request id", async () => {
+  const entry1 = {
+    id: "reused-request-id",
+    timestamp: "2026-03-30T12:35:00.000Z",
+    method: "POST",
+    path: "/v1/chat/completions",
+    status: 503,
+    model: "openai/gpt-4.1",
+    provider: "openai",
+    duration: 12,
+    requestBody: { attempt: 1 },
+    responseBody: { error: "upstream timeout" },
+  };
+
+  const entry2 = {
+    ...entry1,
+    status: 200,
+    requestBody: { attempt: 2 },
+    responseBody: { output: "fallback success" },
+  };
+
+  await callLogs.saveCallLog(entry1);
+  await callLogs.saveCallLog(entry2);
+
+  const rows = core
+    .getDbInstance()
+    .prepare("SELECT id, artifact_relpath FROM call_logs ORDER BY rowid")
+    .all() as Array<{ id: string; artifact_relpath: string }>;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].id, entry1.id);
+  assert.match(rows[1].id, new RegExp(`^${entry1.id}_fb_`));
+
+  // Verify that attempt 1's artifact on disk was not overwritten by attempt 2
+  const artifactPath1 = path.join(TEST_DATA_DIR, "call_logs", rows[0].artifact_relpath);
+  const artifactPath2 = path.join(TEST_DATA_DIR, "call_logs", rows[1].artifact_relpath);
+  assert.notEqual(rows[0].artifact_relpath, rows[1].artifact_relpath);
+  assert.ok(fs.existsSync(artifactPath1));
+  assert.ok(fs.existsSync(artifactPath2));
+
+  const artifact1 = JSON.parse(fs.readFileSync(artifactPath1, "utf8"));
+  const artifact2 = JSON.parse(fs.readFileSync(artifactPath2, "utf8"));
+  assert.deepEqual(artifact1.requestBody, { attempt: 1 });
+  assert.deepEqual(artifact2.requestBody, { attempt: 2 });
+});
+
+test("saveCallLog fallback disambiguation handles insert race via secondary catch block", async () => {
+  const db = core.getDbInstance();
+  const entry1 = {
+    id: "race-reused-id",
+    timestamp: "2026-03-30T12:35:00.000Z",
+    method: "POST",
+    path: "/v1/chat/completions",
+    status: 503,
+    model: "openai/gpt-4.1",
+    provider: "openai",
+    duration: 12,
+  };
+
+  await callLogs.saveCallLog(entry1);
+
+  // Simulate a race condition where the pre-check did not see the existing row
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = ((sql: string, ...args: unknown[]) => {
+    if (sql.includes("SELECT 1 FROM call_logs WHERE id = ?")) {
+      return {
+        get: () => undefined,
+      };
+    }
+    return originalPrepare(sql, ...args);
+  }) as typeof db.prepare;
+
+  try {
+    const entry2 = {
+      ...entry1,
+      status: 200,
+      duration: 15,
+    };
+    await callLogs.saveCallLog(entry2);
+  } finally {
+    db.prepare = originalPrepare;
+  }
+
+  const rows = db
+    .prepare("SELECT id FROM call_logs WHERE id LIKE 'race-reused-id%' ORDER BY rowid")
+    .all() as Array<{ id: string }>;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].id, "race-reused-id");
+  assert.match(rows[1].id, /^race-reused-id_fb_/);
 });
 
 test("saveCallLog logs and returns when sqlite persistence throws unexpectedly", async () => {

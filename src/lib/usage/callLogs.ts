@@ -137,6 +137,11 @@ function generateLogId() {
   return `${Date.now()}-${logIdCounter}`;
 }
 
+function isDuplicateCallLogIdError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /UNIQUE constraint failed:\s*call_logs\.id/i.test(message);
+}
+
 async function resolveAccountName(connectionId: string | null | undefined) {
   let account = connectionId ? connectionId.slice(0, 8) : "-";
 
@@ -483,8 +488,13 @@ async function saveCallLogOperation(entry: any): Promise<void> {
     const tokensReasoning = getReasoningTokensOrNull(entry.tokens);
     const reasoningObservation = resolveReasoningObservation(tokensReasoning, entry.responseBody);
     const errorType = classifyCallLogError(entry.status, entry.error, entry.provider);
+    const db = getDbInstance();
+    const idExists = entry.id
+      ? db.prepare("SELECT 1 FROM call_logs WHERE id = ? LIMIT 1").get(entry.id)
+      : null;
+    const assignedId = idExists ? `${entry.id}_fb_${generateLogId()}` : entry.id || generateLogId();
     const logEntry = {
-      id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : generateLogId(),
+      id: assignedId,
       timestamp: typeof entry.timestamp === "string" ? entry.timestamp : new Date().toISOString(),
       method: entry.method || "POST",
       path: entry.path || "/v1/chat/completions",
@@ -563,8 +573,7 @@ async function saveCallLogOperation(entry: any): Promise<void> {
       }
     }
 
-    const db = getDbInstance();
-    db.prepare(
+    const insertCallLog = db.prepare(
       `
       INSERT INTO call_logs (
         id, timestamp, method, path, status, model, requested_model, provider,
@@ -591,7 +600,8 @@ async function saveCallLogOperation(entry: any): Promise<void> {
         @videoContentRemoved
       )
     `
-    ).run({
+    );
+    const insertParams = {
       ...logEntry,
       errorSummary: toStoredErrorSummary(protectedError),
       detailState,
@@ -602,7 +612,16 @@ async function saveCallLogOperation(entry: any): Promise<void> {
       hasResponseBody: protectedResponseBody !== null ? 1 : 0,
       hasPipelineDetails: protectedPipelinePayloads ? 1 : 0,
       requestSummary,
-    });
+    };
+
+    try {
+      insertCallLog.run(insertParams);
+    } catch (error) {
+      // Fallback attempts intentionally share a pending request ID for live
+      // dashboard tracking, but each attempt is a distinct database row.
+      if (!isDuplicateCallLogIdError(error)) throw error;
+      insertCallLog.run({ ...insertParams, id: `${insertParams.id}_fb_${generateLogId()}` });
+    }
 
     scheduleCallLogRotation();
   } catch (error) {
