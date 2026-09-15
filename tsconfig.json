@@ -64,6 +64,7 @@
     ".scratch",
     ".agents",
     ".slim",
-    "packages"
+    "packages",
+    "_artifacts"
   ]
 }
