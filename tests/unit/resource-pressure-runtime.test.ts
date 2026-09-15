@@ -456,4 +456,218 @@ describe("ResourcePressureRuntime stale-while-revalidate cache", () => {
     await settleRefresh(runtime);
     assert.equal(sampleCount, 3, "disposed runtime does not schedule refresh from getObservation");
   });
+
+  describe("bounded GC reclamation on immediate absolute-heap breach", () => {
+    it("REQ-RP-1: calls GC once on immediate breach, returns null after recovery, and leaves observation state normal", () => {
+      let gcCalls = 0;
+      let heapUsed = 15000;
+      const originalWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (msg?: unknown, ...args: unknown[]) => {
+        warnings.push([msg, ...args].join(" "));
+      };
+      try {
+        const runtime = createResourcePressureRuntime({
+          heapThresholdMb: 14253,
+          immediateHeapUsedMb: () => heapUsed,
+          gc: () => {
+            gcCalls += 1;
+            heapUsed = 7000;
+          },
+        });
+
+        const guard = runtime.check();
+        assert.equal(gcCalls, 1);
+        assert.equal(guard, null);
+        assert.equal(
+          warnings.filter((w) => w.includes("returning 503")).length,
+          0,
+          "successful recovery must not log 503 rejection warning"
+        );
+        const observation = runtime.getObservation();
+        assert.equal(observation.state.severity, "normal");
+        runtime.dispose();
+      } finally {
+        console.warn = originalWarn;
+      }
+    });
+
+    it("REQ-RP-2A: returns existing 503 guard with reason v8_heap_absolute and 0 GC calls when GC is unavailable", () => {
+      let gcCalls = 0;
+      const runtime = createResourcePressureRuntime({
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => 15000,
+        gc: undefined,
+      });
+
+      const guard = runtime.check();
+      assert.ok(guard);
+      assert.equal(guard.status, 503);
+      assert.equal(gcCalls, 0);
+      assert.equal(runtime.getObservation().state.reason, "v8_heap_absolute");
+      runtime.dispose();
+    });
+
+    it("REQ-RP-2B: returns existing 503 guard with reason v8_heap_absolute when GC is unrecovered", () => {
+      let gcCalls = 0;
+      const runtime = createResourcePressureRuntime({
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => 15000,
+        gc: () => {
+          gcCalls += 1;
+        },
+      });
+
+      const guard = runtime.check();
+      assert.ok(guard);
+      assert.equal(guard.status, 503);
+      assert.equal(gcCalls, 1);
+      assert.equal(runtime.getObservation().state.reason, "v8_heap_absolute");
+      runtime.dispose();
+    });
+
+    it("REQ-RP-2C: returns existing 503 guard with reason v8_heap_absolute when GC throws without rethrowing", () => {
+      let gcCalls = 0;
+      const runtime = createResourcePressureRuntime({
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => 15000,
+        gc: () => {
+          gcCalls += 1;
+          throw new Error("GC failure");
+        },
+      });
+
+      const guard = runtime.check();
+      assert.ok(guard);
+      assert.equal(guard.status, 503);
+      assert.equal(gcCalls, 1);
+      assert.equal(runtime.getObservation().state.reason, "v8_heap_absolute");
+      runtime.dispose();
+    });
+
+    it("REQ-RP-3: enforces cooldown gate at check times 0, 1000, 59999, 60000 with persistent breach", () => {
+      let now = 0;
+      let gcCalls = 0;
+      const runtime = createResourcePressureRuntime({
+        nowMs: () => now,
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => 15000,
+        gcCooldownMs: 60000,
+        gc: () => {
+          gcCalls += 1;
+        },
+      });
+
+      // At 0ms
+      now = 0;
+      const guard0 = runtime.check();
+      assert.ok(guard0);
+      assert.equal(guard0.status, 503);
+      assert.equal(gcCalls, 1);
+
+      // At 1000ms
+      now = 1000;
+      const guard1000 = runtime.check();
+      assert.ok(guard1000);
+      assert.equal(guard1000.status, 503);
+      assert.equal(gcCalls, 1);
+
+      // At 59999ms
+      now = 59999;
+      const guard59999 = runtime.check();
+      assert.ok(guard59999);
+      assert.equal(guard59999.status, 503);
+      assert.equal(gcCalls, 1);
+
+      // At 60000ms
+      now = 60000;
+      const guard60000 = runtime.check();
+      assert.ok(guard60000);
+      assert.equal(guard60000.status, 503);
+      assert.equal(gcCalls, 2);
+
+      runtime.dispose();
+    });
+
+    it("REQ-RP-4: recovers at cooldown boundary on second GC call, returning null and normal observation state", () => {
+      let now = 0;
+      let gcCalls = 0;
+      let heapUsed = 15000;
+      const runtime = createResourcePressureRuntime({
+        nowMs: () => now,
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => heapUsed,
+        gcCooldownMs: 60000,
+        gc: () => {
+          gcCalls += 1;
+          if (gcCalls === 2) {
+            heapUsed = 7000;
+          }
+        },
+      });
+
+      // First check at 0ms: unrecovered
+      now = 0;
+      const guard1 = runtime.check();
+      assert.ok(guard1);
+      assert.equal(guard1.status, 503);
+      assert.equal(gcCalls, 1);
+      assert.equal(runtime.getObservation().state.severity, "critical");
+
+      // Second check at 60000ms: second permitted GC reduces heap, check returns null, state is normal
+      now = 60000;
+      const guard2 = runtime.check();
+      assert.equal(gcCalls, 2);
+      assert.equal(guard2, null);
+      assert.equal(runtime.getObservation().state.severity, "normal");
+
+      runtime.dispose();
+    });
+
+    it("adversarial: preserves 503 when GC sets heap below threshold then throws", () => {
+      let gcCalls = 0;
+      let heapUsed = 15000;
+      const runtime = createResourcePressureRuntime({
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => heapUsed,
+        gc: () => {
+          gcCalls += 1;
+          heapUsed = 7000;
+          throw new Error("partial GC crash");
+        },
+      });
+
+      const guard = runtime.check();
+      assert.ok(guard);
+      assert.equal(guard.status, 503);
+      assert.equal(gcCalls, 1);
+      assert.equal(runtime.getObservation().state.reason, "v8_heap_absolute");
+      runtime.dispose();
+    });
+
+    it("adversarial: preserves 503 when post-GC immediateHeapUsedMb throws", () => {
+      let gcCalls = 0;
+      let measureCalls = 0;
+      const runtime = createResourcePressureRuntime({
+        heapThresholdMb: 14253,
+        immediateHeapUsedMb: () => {
+          measureCalls += 1;
+          if (measureCalls === 1) {
+            return 15000;
+          }
+          throw new Error("process.memoryUsage() failed");
+        },
+        gc: () => {
+          gcCalls += 1;
+        },
+      });
+
+      const guard = runtime.check();
+      assert.ok(guard);
+      assert.equal(guard.status, 503);
+      assert.equal(gcCalls, 1);
+      assert.equal(runtime.getObservation().state.reason, "v8_heap_absolute");
+      runtime.dispose();
+    });
+  });
 });

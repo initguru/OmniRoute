@@ -40,6 +40,8 @@ export type ResourcePressureRuntimeOptions = {
   maxStaleMs?: number;
   retryAfterMs?: number;
   samplerDeps?: SampleResourceSignalsDeps;
+  gc?: (() => void) | null;
+  gcCooldownMs?: number;
 };
 
 export type ResourcePressureRuntime = {
@@ -159,11 +161,18 @@ export function createResourcePressureRuntime(
   const staleAfterMs = requireDuration("staleAfterMs", options.staleAfterMs ?? 1_000);
   const maxStaleMs = requireDuration("maxStaleMs", options.maxStaleMs ?? 30_000);
   const retryAfterMs = requireDuration("retryAfterMs", options.retryAfterMs ?? 1_000);
+  const gcCooldownMs = requireDuration("gcCooldownMs", options.gcCooldownMs ?? 60_000);
   if (maxStaleMs < staleAfterMs) {
     throw new RangeError("maxStaleMs must be greater than or equal to staleAfterMs");
   }
 
   const nowMs = options.nowMs ?? Date.now;
+  const gc =
+    options.gc !== undefined
+      ? options.gc
+      : typeof globalThis.gc === "function"
+        ? () => (globalThis.gc as () => void)()
+        : null;
   const immediateHeapUsedMb =
     options.immediateHeapUsedMb ?? (() => process.memoryUsage().heapUsed / MB);
   const sample = options.sample ?? (() => sampleResourceSignals(options.samplerDeps));
@@ -179,6 +188,7 @@ export function createResourcePressureRuntime(
   let state = emptyState();
   let lastRefreshAtMs = Number.NEGATIVE_INFINITY;
   let nextRefreshAtMs = Number.NEGATIVE_INFINITY;
+  let lastGcAtMs = Number.NEGATIVE_INFINITY;
   let scheduled = false;
   let inFlight: Promise<void> | null = null;
   let disposed = false;
@@ -218,10 +228,37 @@ export function createResourcePressureRuntime(
       } catch {
         heapUsedMb = 0;
       }
-      const immediate = immediateHeapGuard(heapUsedMb, heapThresholdMb);
+      let breached = heapThresholdMb != null && checkHeapPressureGuard(heapUsedMb, heapThresholdMb) !== null;
       const now = nowMs();
+      if (breached && gc && now - lastGcAtMs >= gcCooldownMs) {
+        lastGcAtMs = now;
+        let gcThrew = false;
+        try {
+          gc();
+        } catch {
+          gcThrew = true;
+        }
+        if (gcThrew) {
+          breached = true;
+        } else {
+          let remeasureFailed = false;
+          try {
+            heapUsedMb = immediateHeapUsedMb();
+          } catch {
+            remeasureFailed = true;
+          }
+          if (remeasureFailed) {
+            breached = true;
+          } else {
+            breached = heapThresholdMb != null && checkHeapPressureGuard(heapUsedMb, heapThresholdMb) !== null;
+          }
+        }
+        if (!breached && state.reason === "v8_heap_absolute") {
+          state = emptyState();
+        }
+      }
       if (now >= nextRefreshAtMs) scheduleRefresh();
-      if (immediate) {
+      if (breached) {
         state = {
           severity: "critical",
           reason: "v8_heap_absolute",
@@ -230,7 +267,10 @@ export function createResourcePressureRuntime(
           lastTransitionAtMs: now,
           observedAtMs: now,
         };
-        return immediate;
+        return buildCriticalGuard("v8_heap_absolute", {
+          heapUsedMb: Math.round(heapUsedMb),
+          thresholdMb: heapThresholdMb != null ? Math.round(heapThresholdMb) : null,
+        });
       }
       const cacheAge = lastSignals ? Math.max(0, now - lastRefreshAtMs) : Number.POSITIVE_INFINITY;
       if (cacheAge > maxStaleMs || state.severity !== "critical") {
