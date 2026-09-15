@@ -1,4 +1,4 @@
-import { checkHeapPressureGuard, HEAP_PRESSURE_THRESHOLD_MB } from "./heapPressure.ts";
+import { HEAP_PRESSURE_THRESHOLD_MB } from "./heapPressure.ts";
 import { buildErrorBody } from "./error.ts";
 import {
   createResourcePressureTracker,
@@ -130,19 +130,6 @@ function buildCriticalGuard(
   };
 }
 
-function immediateHeapGuard(
-  heapUsedMb: number,
-  thresholdMb: number | null
-): ResourcePressureGuardResult | null {
-  if (thresholdMb == null) return null;
-  const guard = checkHeapPressureGuard(heapUsedMb, thresholdMb);
-  if (!guard) return null;
-  return buildCriticalGuard("v8_heap_absolute", {
-    heapUsedMb: Math.round(heapUsedMb),
-    thresholdMb: Math.round(thresholdMb),
-  });
-}
-
 export function createResourcePressureRuntime(
   options: ResourcePressureRuntimeOptions = {}
 ): ResourcePressureRuntime {
@@ -228,7 +215,7 @@ export function createResourcePressureRuntime(
       } catch {
         heapUsedMb = 0;
       }
-      let breached = heapThresholdMb != null && checkHeapPressureGuard(heapUsedMb, heapThresholdMb) !== null;
+      let breached = heapThresholdMb != null && heapUsedMb > heapThresholdMb;
       const now = nowMs();
       if (breached && gc && now - lastGcAtMs >= gcCooldownMs) {
         lastGcAtMs = now;
@@ -250,7 +237,7 @@ export function createResourcePressureRuntime(
           if (remeasureFailed) {
             breached = true;
           } else {
-            breached = heapThresholdMb != null && checkHeapPressureGuard(heapUsedMb, heapThresholdMb) !== null;
+            breached = heapThresholdMb != null && heapUsedMb > heapThresholdMb;
           }
         }
         if (!breached && state.reason === "v8_heap_absolute") {
