@@ -303,6 +303,7 @@ const nextConfig = {
     "**/*": [
       "**/.git/**",
       "**/_tasks/**",
+      "**/_artifacts/**",
       "**/_references/**",
       "**/_ideia/**",
       "**/_mono_repo/**",
