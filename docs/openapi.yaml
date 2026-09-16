@@ -3054,23 +3054,177 @@ paths:
       responses:
         "200":
           description: System prompt configuration
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Settings revision ETag
+            Cache-Control:
+              schema:
+                type: string
+              description: Caching directive (no-store)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  prefixPrompt:
+                    type: string
+                  suffixPrompt:
+                    type: string
+                  settingsRevision:
+                    type: integer
     put:
       tags: [Settings]
       summary: Update system prompt configuration
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Expected settings revision
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [enabled, prefixPrompt, suffixPrompt]
+              additionalProperties: false
               properties:
-                prompt:
-                  type: string
                 enabled:
                   type: boolean
+                prefixPrompt:
+                  type: string
+                  maxLength: 50000
+                suffixPrompt:
+                  type: string
+                  maxLength: 50000
+                expectedRevision:
+                  type: integer
+                  minimum: 0
       responses:
         "200":
           description: Updated system prompt configuration
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Settings revision ETag
+            Cache-Control:
+              schema:
+                type: string
+              description: Caching directive (no-store)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  prefixPrompt:
+                    type: string
+                  suffixPrompt:
+                    type: string
+                  settingsRevision:
+                    type: integer
+        "400":
+          description: Invalid expected revision or validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [INVALID_EXPECTED_REVISION, VALIDATION_FAILED, INVALID_JSON]
+                      message:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+              examples:
+                invalidExpectedRevision:
+                  summary: Malformed or mismatched expected revision
+                  value:
+                    error:
+                      code: INVALID_EXPECTED_REVISION
+                      message: Malformed or non-integer expected revision token
+                validationFailed:
+                  summary: Schema validation failure
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: Required field missing or unrecognized properties
+        "409":
+          description: Settings revision conflict
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Current settings revision ETag
+            Cache-Control:
+              schema:
+                type: string
+              description: Caching directive (no-store)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message, currentRevision]
+                    properties:
+                      code:
+                        type: string
+                        enum: [SETTINGS_REVISION_CONFLICT]
+                      message:
+                        type: string
+                      currentRevision:
+                        type: integer
+              examples:
+                revisionConflict:
+                  summary: Stale revision conflict
+                  value:
+                    error:
+                      code: SETTINGS_REVISION_CONFLICT
+                      message: Settings changed since this snapshot; refresh and retry
+                      currentRevision: 11
+        "428":
+          description: Precondition required
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [PRECONDITION_REQUIRED]
+                      message:
+                        type: string
+              examples:
+                preconditionRequired:
+                  summary: Missing mandatory revision header and body
+                  value:
+                    error:
+                      code: PRECONDITION_REQUIRED
+                      message: Mandatory expectedRevision (header or body) is required
 
   /api/settings/thinking-budget:
     get:

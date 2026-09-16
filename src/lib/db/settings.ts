@@ -119,6 +119,55 @@ export async function getSettingsRevision(): Promise<number> {
   return readSettingsRevision(getDbInstance());
 }
 
+export interface SystemPromptConfig {
+  enabled: boolean;
+  prefixPrompt: string;
+  suffixPrompt: string;
+}
+
+export interface SystemPromptSettingSnapshot {
+  config: SystemPromptConfig;
+  settingsRevision: number;
+}
+
+export async function getSystemPromptSettingSnapshot(): Promise<SystemPromptSettingSnapshot> {
+  const db = getDbInstance();
+  return db.transaction(() => {
+    const settingsRevision = readSettingsRevision(db);
+    const row = db
+      .prepare("SELECT value FROM key_value WHERE namespace = 'settings' AND key = 'systemPrompt'")
+      .get() as { value?: string } | undefined;
+
+    let raw: Record<string, unknown> = {};
+    if (row?.value) {
+      try {
+        const parsed = JSON.parse(row.value);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          raw = parsed as Record<string, unknown>;
+        }
+      } catch {
+        raw = {};
+      }
+    }
+
+    const prefixPrompt = typeof raw.prefixPrompt === "string" ? raw.prefixPrompt : "";
+    let suffixPrompt = typeof raw.suffixPrompt === "string" ? raw.suffixPrompt : "";
+    if (!suffixPrompt && typeof raw.prompt === "string" && raw.prompt) {
+      suffixPrompt = raw.prompt;
+    }
+    const enabled = typeof raw.enabled === "boolean" ? raw.enabled : false;
+
+    return {
+      config: {
+        enabled,
+        prefixPrompt,
+        suffixPrompt,
+      },
+      settingsRevision,
+    };
+  })();
+}
+
 /**
  * #7274: read-fallback for the codexSessionAffinityTtlMs -> sessionAffinityTtlMs
  * rename. Migration 124 already backfills the new key from any pre-existing

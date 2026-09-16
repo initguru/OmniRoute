@@ -41,6 +41,8 @@ import {
 } from "@/server/authz/headers";
 import { readSubjectFromHeaders } from "@/server/authz/assertAuth";
 
+import { settingsResponseHeaders, parseOptInExpectedRevision } from "@/lib/api/settingsRevision";
+
 /**
  * Force this route to run dynamically per-request and never be cached/prerendered.
  * Combined with the `Cache-Control: no-store` response header below, this keeps
@@ -50,16 +52,6 @@ import { readSubjectFromHeaders } from "@/server/authz/assertAuth";
  */
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-/** Response headers applied to every successful GET/PATCH on /api/settings. */
-const SETTINGS_RESPONSE_HEADERS = { "Cache-Control": "no-store" } as const;
-
-function settingsResponseHeaders(settingsRevision: number): Record<string, string> {
-  return {
-    ...SETTINGS_RESPONSE_HEADERS,
-    ETag: String(settingsRevision),
-  };
-}
 
 const RadarAdminOwnerSubjectSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("dashboard_session"), id: z.literal("dashboard") }).strict(),
@@ -80,24 +72,6 @@ export async function resolveOwnerRadarAdminUrl(request: Request): Promise<strin
   if (request.headers.get(AUTHZ_HEADER_PEER_LOCALITY) !== "loopback") return null;
   if (await isAuthRequired(request)) return null;
   return getRadarAdminUrl();
-}
-
-/** Parse opt-in CAS token from If-Match (preferred) or PATCH body. */
-function parseExpectedRevision(
-  request: Request,
-  body: Record<string, unknown>
-): number | undefined {
-  const ifMatch = request.headers.get("If-Match");
-  if (ifMatch !== null) {
-    const trimmed = ifMatch.replace(/^W\/"/, "").replace(/"$/, "").trim();
-    const parsed = Number(trimmed);
-    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
-  }
-  const fromBody = body.expectedRevision;
-  if (typeof fromBody === "number" && Number.isInteger(fromBody) && fromBody >= 0) {
-    return fromBody;
-  }
-  return undefined;
 }
 
 /**
@@ -294,7 +268,7 @@ export async function PATCH(request: Request) {
     );
   }
   const attemptedKeys = attemptedKeysOf(rawBody);
-  const expectedRevision = parseExpectedRevision(request, rawBody);
+  const expectedRevision = parseOptInExpectedRevision(request, rawBody);
 
   try {
     // Zod validation

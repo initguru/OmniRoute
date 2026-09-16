@@ -8369,7 +8369,10 @@
     "headroomProxySave": "Lưu",
     "headroomProxyStart": "Bắt đầu",
     "headroomProxyStop": "Dừng",
-    "headroomProxyExternalHint": "URL này không phải loopback, nên OmniRoute sẽ không khởi chạy CLI cục bộ."
+    "headroomProxyExternalHint": "URL này không phải loopback, nên OmniRoute sẽ không khởi chạy CLI cục bộ.",
+    "systemPromptConflictTitle": "__MISSING__:Settings Conflict",
+    "systemPromptConflictDesc": "__MISSING__:The system prompt was modified in another session or tab.",
+    "systemPromptConflictReload": "__MISSING__:Reload Server Settings"
   },
   "contextRtk": {
     "title": "RTK Engine",

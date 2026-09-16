@@ -8365,7 +8365,10 @@
     "headroomProxySave": "__MISSING__:Save",
     "headroomProxyStart": "__MISSING__:Start",
     "headroomProxyStop": "__MISSING__:Stop",
-    "headroomProxyExternalHint": "__MISSING__:This URL is not loopback, so OmniRoute will not spawn the local CLI."
+    "headroomProxyExternalHint": "__MISSING__:This URL is not loopback, so OmniRoute will not spawn the local CLI.",
+    "systemPromptConflictTitle": "__MISSING__:Settings Conflict",
+    "systemPromptConflictDesc": "__MISSING__:The system prompt was modified in another session or tab.",
+    "systemPromptConflictReload": "__MISSING__:Reload Server Settings"
   },
   "contextRtk": {
     "title": "محرك آر تي كيه",

@@ -8368,7 +8368,10 @@
     "cliproxyapiHealth": "Health",
     "cliproxyapiPort": "Port",
     "qdrantHost": "Host",
-    "qdrantCollection": "Collection"
+    "qdrantCollection": "Collection",
+    "systemPromptConflictTitle": "Settings Conflict",
+    "systemPromptConflictDesc": "The system prompt was modified in another session or tab.",
+    "systemPromptConflictReload": "Reload Server Settings"
   },
   "contextRtk": {
     "title": "RTK Engine",

@@ -1,65 +1,228 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, Toggle } from "@/shared/components";
 import { useTranslations } from "next-intl";
 
+interface SystemPromptDraft {
+  enabled: boolean;
+  prefixPrompt: string;
+  suffixPrompt: string;
+}
+
+interface ConflictState {
+  isConflict: boolean;
+  currentRevision?: number;
+}
+
 export default function SystemPromptTab() {
-  const [config, setConfig] = useState({ enabled: false, prefixPrompt: "", suffixPrompt: "" });
+  const [draft, setDraft] = useState<SystemPromptDraft>({
+    enabled: false,
+    prefixPrompt: "",
+    suffixPrompt: "",
+  });
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
-  const [debounceTimer, setDebounceTimer] = useState(null);
-  const configRef = useRef(config);
+  const [conflictState, setConflictState] = useState<ConflictState>({ isConflict: false });
+
+  const draftRef = useRef<SystemPromptDraft>(draft);
+  const persistedSnapshotRef = useRef<SystemPromptDraft>(draft);
+  const revisionRef = useRef<number | null>(null);
+  const isSavingRef = useRef<boolean>(false);
+  const pendingDraftRef = useRef<SystemPromptDraft | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const t = useTranslations("settings");
 
-  useEffect(() => {
-    fetch("/api/settings/system-prompt")
-      .then((res) => res.json())
-      .then((data) => {
-        setConfig({
-          enabled: data?.enabled ?? false,
-          prefixPrompt: data?.prefixPrompt ?? "",
-          suffixPrompt: data?.suffixPrompt ?? "",
-        });
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const applyLoadedSettings = useCallback(
+    (data: {
+      enabled?: boolean;
+      prefixPrompt?: string;
+      suffixPrompt?: string;
+      settingsRevision?: number;
+    }) => {
+      const loaded: SystemPromptDraft = {
+        enabled: data?.enabled ?? false,
+        prefixPrompt: data?.prefixPrompt ?? "",
+        suffixPrompt: data?.suffixPrompt ?? "",
+      };
+      const rev = typeof data?.settingsRevision === "number" ? data.settingsRevision : 0;
 
-  const save = async (updates) => {
-    const newConfig = { ...configRef.current, ...updates };
-    setConfig(newConfig);
-    configRef.current = newConfig;
-    setStatus("");
+      setDraft(loaded);
+      draftRef.current = loaded;
+      persistedSnapshotRef.current = loaded;
+      revisionRef.current = rev;
+      setConflictState({ isConflict: false });
+      setLoading(false);
+    },
+    []
+  );
+
+  const loadServerSettings = useCallback(async () => {
     try {
+      const res = await fetch("/api/settings/system-prompt");
+      if (!res.ok) throw new Error("Failed to load");
+      const data = await res.json();
+      applyLoadedSettings(data);
+    } catch {
+      setLoading(false);
+    }
+  }, [applyLoadedSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/settings/system-prompt")
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load");
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          applyLoadedSettings(data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [applyLoadedSettings]);
+
+  const executeSave = async (targetDraft: SystemPromptDraft) => {
+    isSavingRef.current = true;
+    setStatus("");
+
+    try {
+      const currentRev = revisionRef.current;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (currentRev !== null && currentRev !== undefined) {
+        headers["If-Match"] = String(currentRev);
+      }
+
+      const payload = {
+        ...targetDraft,
+        ...(currentRev !== null && currentRev !== undefined
+          ? { expectedRevision: currentRev }
+          : {}),
+      };
+
       const res = await fetch("/api/settings/system-prompt", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newConfig),
+        headers,
+        body: JSON.stringify(payload),
       });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 409 || res.status === 428) {
+        pendingDraftRef.current = null;
+        isSavingRef.current = false;
+        setConflictState({
+          isConflict: true,
+          currentRevision: data?.error?.currentRevision ?? data?.currentRevision,
+        });
+        return;
+      }
+
       if (res.ok) {
+        const nextRev =
+          typeof data?.settingsRevision === "number"
+            ? data.settingsRevision
+            : (currentRev ?? 0) + 1;
+
+        revisionRef.current = nextRev;
+        persistedSnapshotRef.current = targetDraft;
         setStatus("saved");
         setTimeout(() => setStatus(""), 2000);
+
+        if (pendingDraftRef.current) {
+          const next = pendingDraftRef.current;
+          pendingDraftRef.current = null;
+          await executeSave(next);
+        } else {
+          isSavingRef.current = false;
+        }
+      } else {
+        isSavingRef.current = false;
+        setStatus("error");
       }
     } catch {
+      isSavingRef.current = false;
       setStatus("error");
     }
   };
 
-  const handleFieldChange = (field, text) => {
-    const updated = { ...configRef.current, [field]: text };
-    setConfig(updated);
-    configRef.current = updated;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    setDebounceTimer(
-      setTimeout(() => {
-        save({ [field]: text });
-      }, 800)
-    );
+  const scheduleOrExecuteSave = (targetDraft: SystemPromptDraft) => {
+    if (isSavingRef.current) {
+      pendingDraftRef.current = targetDraft;
+    } else {
+      executeSave(targetDraft);
+    }
+  };
+
+  const handleToggle = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    const next: SystemPromptDraft = {
+      ...draftRef.current,
+      enabled: !draftRef.current.enabled,
+    };
+    setDraft(next);
+    draftRef.current = next;
+    scheduleOrExecuteSave(next);
+  };
+
+  const handleFieldChange = (field: "prefixPrompt" | "suffixPrompt", text: string) => {
+    const next: SystemPromptDraft = {
+      ...draftRef.current,
+      [field]: text,
+    };
+    setDraft(next);
+    draftRef.current = next;
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      scheduleOrExecuteSave(draftRef.current);
+    }, 800);
   };
 
   return (
     <Card>
+      {conflictState.isConflict && (
+        <div className="mb-5 p-4 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-500 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+              warning
+            </span>
+            <div>
+              <h4 className="text-sm font-semibold">{t("systemPromptConflictTitle")}</h4>
+              <p className="text-xs text-amber-500/80">{t("systemPromptConflictDesc")}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={loadServerSettings}
+            className="px-3 py-1.5 rounded-md bg-amber-500 text-white dark:text-neutral-900 text-xs font-medium hover:bg-amber-600 transition-colors shrink-0"
+          >
+            {t("systemPromptConflictReload")}
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center gap-3 mb-5">
         <div className="p-2 rounded-lg bg-amber-500/10 text-amber-500">
           <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
@@ -76,15 +239,11 @@ export default function SystemPromptTab() {
               {t("saved")}
             </span>
           )}
-          <Toggle
-            checked={config.enabled}
-            onChange={() => save({ enabled: !config.enabled })}
-            disabled={loading}
-          />
+          <Toggle checked={draft.enabled} onChange={handleToggle} disabled={loading} />
         </div>
       </div>
 
-      {config.enabled && (
+      {draft.enabled && (
         <div className="flex flex-col gap-5">
           {/* Before Prompt — injected BEFORE agent/provider instructions */}
           <div className="flex flex-col gap-2">
@@ -95,7 +254,7 @@ export default function SystemPromptTab() {
             <p className="text-xs text-text-muted/70">{t("beforePromptDesc")}</p>
             <div className="relative">
               <textarea
-                value={config.prefixPrompt}
+                value={draft.prefixPrompt}
                 onChange={(e) => handleFieldChange("prefixPrompt", e.target.value)}
                 placeholder={t("beforePromptPlaceholder")}
                 rows={9}
@@ -106,7 +265,7 @@ export default function SystemPromptTab() {
                 disabled={loading}
               />
               <div className="absolute bottom-2 right-3 text-xs text-text-muted/60 tabular-nums">
-                {t("chars", { count: config.prefixPrompt.length })}
+                {t("chars", { count: draft.prefixPrompt.length })}
               </div>
             </div>
           </div>
@@ -120,7 +279,7 @@ export default function SystemPromptTab() {
             <p className="text-xs text-text-muted/70">{t("afterPromptDesc")}</p>
             <div className="relative">
               <textarea
-                value={config.suffixPrompt}
+                value={draft.suffixPrompt}
                 onChange={(e) => handleFieldChange("suffixPrompt", e.target.value)}
                 placeholder={t("afterPromptPlaceholder")}
                 rows={9}
@@ -131,7 +290,7 @@ export default function SystemPromptTab() {
                 disabled={loading}
               />
               <div className="absolute bottom-2 right-3 text-xs text-text-muted/60 tabular-nums">
-                {t("chars", { count: config.suffixPrompt.length })}
+                {t("chars", { count: draft.suffixPrompt.length })}
               </div>
             </div>
           </div>
